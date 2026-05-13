@@ -1,40 +1,38 @@
-# docker-compose.yml — inferia-worker, single service.
+# docker-compose.yml — inferia-worker
 #
 # On a GPU host with Docker + NVIDIA Container Toolkit installed:
-#   cp .env.sample .env             # fill in values
-#   docker compose up -d --build    # build + start
-#   docker compose logs -f worker   # tail logs
+#   cp .env.sample .env
+#   # fill in CONTROL_PLANE_URL, BOOTSTRAP_TOKEN, POOL_ID, NODE_NAME,
+#   # WORKER_ADVERTISE_URL, INFERENCE_TOKEN
+#   docker compose up -d
 #
-# The worker registers with the URL in CONTROL_PLANE_URL, exchanges the
+# That's it. The worker will register with InferiaLLM, exchange the
 # bootstrap token for a long-lived JWT (persisted in the worker-state
-# volume), and starts heartbeating + accepting model load commands.
-#
-# That's it. No companion services. The worker is one Go binary.
+# volume), and start heartbeating + accepting model load commands.
 
 services:
   worker:
-    build:
-      context: .
-    image: inferia-worker:local
+    image: ${INFERIA_WORKER_IMAGE:-ghcr.io/inferia/inferia-worker:latest}
     container_name: inferia-worker
     restart: unless-stopped
 
+    # Required: env vars the worker reads at startup.
     environment:
-      CONTROL_PLANE_URL:          ${CONTROL_PLANE_URL}
-      BOOTSTRAP_TOKEN:            ${BOOTSTRAP_TOKEN}
-      NODE_NAME:                  ${NODE_NAME}
-      POOL_ID:                    ${POOL_ID}
-      WORKER_ADVERTISE_URL:       ${WORKER_ADVERTISE_URL}
-      INFERENCE_TOKEN:            ${INFERENCE_TOKEN}
-      WORKER_LISTEN_ADDR:         ${WORKER_LISTEN_ADDR:-0.0.0.0:8080}
-      LOG_LEVEL:                  ${LOG_LEVEL:-info}
-      PULL_TIMEOUT_SECONDS:       ${PULL_TIMEOUT_SECONDS:-600}
-      READINESS_TIMEOUT_SECONDS:  ${READINESS_TIMEOUT_SECONDS:-180}
+      CONTROL_PLANE_URL:        ${CONTROL_PLANE_URL}
+      BOOTSTRAP_TOKEN:          ${BOOTSTRAP_TOKEN}
+      NODE_NAME:                ${NODE_NAME}
+      POOL_ID:                  ${POOL_ID}
+      WORKER_ADVERTISE_URL:     ${WORKER_ADVERTISE_URL}
+      INFERENCE_TOKEN:          ${INFERENCE_TOKEN}
+      WORKER_LISTEN_ADDR:       ${WORKER_LISTEN_ADDR:-0.0.0.0:8080}
+      LOG_LEVEL:                ${LOG_LEVEL:-info}
+      PULL_TIMEOUT_SECONDS:     ${PULL_TIMEOUT_SECONDS:-600}
+      READINESS_TIMEOUT_SECONDS: ${READINESS_TIMEOUT_SECONDS:-180}
       HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-5}
-      MODELS_NETWORK:             ${MODELS_NETWORK:-inferia-models}
+      MODELS_NETWORK:           ${MODELS_NETWORK:-inferia-models}
 
     # Required volumes:
-    #   - /var/run/docker.sock : worker launches sibling model containers on the host.
+    #   - /var/run/docker.sock : the worker launches sibling containers on the host.
     #   - worker-state         : persists the worker JWT across restarts.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:rw
@@ -45,15 +43,15 @@ services:
     ports:
       - "${INFERENCE_PORT:-8080}:8080"
 
-    # If CONTROL_PLANE_URL points at a service on the host (e.g.
-    # http://localhost:<port>) you'll want host.docker.internal to resolve:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    # No healthcheck in compose: the distroless image has no wget/curl, and
+    # the worker's /healthz is intended for external operator monitoring (the
+    # control plane already knows liveness from heartbeats). Operators who
+    # want a local-host probe can add their own using a sibling container.
 
-    # GPU access for the worker container itself is not required — it never
-    # runs CUDA code, only launches sibling containers that get --gpus passed
-    # through via the Docker SDK. Uncomment to also expose GPUs to the worker
-    # process itself (for nvidia-smi-based telemetry from inside the container):
+    # GPU access for the worker itself is NOT required — it never runs CUDA
+    # code, only launches sibling containers that get --gpus passed through
+    # via the Docker SDK. Operators who want the worker to also see GPUs for
+    # telemetry should uncomment the deploy block below.
     #
     # deploy:
     #   resources:
@@ -63,11 +61,23 @@ services:
     #           count: all
     #           capabilities: [gpu]
 
+    # Attach to the InferiaLLM control-plane network when present so the
+    # worker can resolve the control plane's container hostname (e.g.
+    # inferia-app). Operators using a different network can override
+    # WORKER_NETWORK or remove this block.
+    networks:
+      - default
+      - inferia-cp
+
 volumes:
   worker-state:
     driver: local
 
-# Note: the 'inferia-models' Docker network used by sibling model containers
-# is created by the worker on startup (idempotent). Not declared here so
-# 'docker compose down -v' doesn't drop it while model containers are still
-# attached.
+networks:
+  inferia-cp:
+    name: ${WORKER_NETWORK:-deploy_inferia-net}
+    external: true
+
+# The 'inferia-models' network is created by the worker on startup (idempotent).
+# We don't define it here so 'docker compose down -v' doesn't drop it together
+# with model containers that may still be running.
