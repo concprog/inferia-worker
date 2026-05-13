@@ -1,0 +1,70 @@
+# docker-compose.yml — inferia-worker
+#
+# On a GPU host with Docker + NVIDIA Container Toolkit installed:
+#   cp .env.sample .env
+#   # fill in CONTROL_PLANE_URL, BOOTSTRAP_TOKEN, POOL_ID, NODE_NAME,
+#   # WORKER_ADVERTISE_URL, INFERENCE_TOKEN
+#   docker compose up -d
+#
+# That's it. The worker will register with InferiaLLM, exchange the
+# bootstrap token for a long-lived JWT (persisted in the worker-state
+# volume), and start heartbeating + accepting model load commands.
+
+services:
+  worker:
+    image: ${INFERIA_WORKER_IMAGE:-ghcr.io/inferia/inferia-worker:latest}
+    container_name: inferia-worker
+    restart: unless-stopped
+
+    # Required: env vars the worker reads at startup.
+    environment:
+      CONTROL_PLANE_URL:        ${CONTROL_PLANE_URL}
+      BOOTSTRAP_TOKEN:          ${BOOTSTRAP_TOKEN}
+      NODE_NAME:                ${NODE_NAME}
+      POOL_ID:                  ${POOL_ID}
+      WORKER_ADVERTISE_URL:     ${WORKER_ADVERTISE_URL}
+      INFERENCE_TOKEN:          ${INFERENCE_TOKEN}
+      WORKER_LISTEN_ADDR:       ${WORKER_LISTEN_ADDR:-0.0.0.0:8080}
+      LOG_LEVEL:                ${LOG_LEVEL:-info}
+      PULL_TIMEOUT_SECONDS:     ${PULL_TIMEOUT_SECONDS:-600}
+      READINESS_TIMEOUT_SECONDS: ${READINESS_TIMEOUT_SECONDS:-180}
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-5}
+      MODELS_NETWORK:           ${MODELS_NETWORK:-inferia-models}
+
+    # Required volumes:
+    #   - /var/run/docker.sock : the worker launches sibling containers on the host.
+    #   - worker-state         : persists the worker JWT across restarts.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - worker-state:/var/lib/inferia-worker
+
+    # Inference port exposed to the local network. The control plane reaches
+    # the worker at WORKER_ADVERTISE_URL which must terminate here.
+    ports:
+      - "${INFERENCE_PORT:-8080}:8080"
+
+    # No healthcheck in compose: the distroless image has no wget/curl, and
+    # the worker's /healthz is intended for external operator monitoring (the
+    # control plane already knows liveness from heartbeats). Operators who
+    # want a local-host probe can add their own using a sibling container.
+
+    # GPU access for the worker itself is NOT required — it never runs CUDA
+    # code, only launches sibling containers that get --gpus passed through
+    # via the Docker SDK. Operators who want the worker to also see GPUs for
+    # telemetry should uncomment the deploy block below.
+    #
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  worker-state:
+    driver: local
+
+# The 'inferia-models' network is created by the worker on startup (idempotent).
+# We don't define it here so 'docker compose down -v' doesn't drop it together
+# with model containers that may still be running.

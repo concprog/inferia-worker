@@ -8,14 +8,15 @@ test:
 test-integration:
 	go test -race -count=1 -tags=integration ./...
 
-# Coverage gate: combine unit + integration coverage; require ≥ 90%.
-# (Pure SDK wrappers in internal/runtime/dockerclient are integration-tested
-# only, so we run with -tags=integration to include them in the total.)
+# Coverage gate: require ≥ 95% on internal/* (the testable logic). cmd/worker
+# is the wiring layer and is excluded because main() can't be unit-tested.
+# We pass -tags=integration so dockerclient SDK wrappers run against a real
+# daemon (skip if unavailable).
 coverage:
-	go test -race -count=1 -tags=integration -coverprofile=coverage.out -covermode=atomic ./...
+	go test -race -count=1 -tags=integration -coverprofile=coverage.out -covermode=atomic ./internal/...
 	@total=$$(go tool cover -func=coverage.out | tail -n1 | awk '{print $$3}' | sed 's/%//'); \
-	echo "Total coverage: $$total%"; \
-	awk -v t=$$total 'BEGIN { if (t+0 < 90) { print "FAIL: coverage " t "% < 90%"; exit 1 } }'
+	echo "Internal coverage: $$total%"; \
+	awk -v t=$$total 'BEGIN { if (t+0 < 95) { print "FAIL: coverage " t "% < 95%"; exit 1 } }'
 
 coverage-html: coverage
 	go tool cover -html=coverage.out -o coverage.html

@@ -6,14 +6,16 @@ This document is **kept in sync with the codebase as it grows**. When a new pack
 
 | Path | Purpose |
 |---|---|
-| `cmd/worker/` | Process entry point. Wires deps, starts servers. |
+| `cmd/worker/` | Process entry point. Wires deps, starts servers. Not coverage-gated (wiring only). |
 | `internal/config/` | Env-driven configuration with validation. |
 | `internal/telemetry/` | CPU / memory / GPU telemetry collection. |
 | `internal/auth/` | Token store + inference-token middleware. |
 | `internal/runtime/` | Model lifecycle: pull → run → readiness → unload. |
 | `internal/runtime/recipes/` | Launch recipes (vllm, ollama, …) ported from Nosana job_builder. |
 | `internal/runtime/dockerclient/` | Thin wrapper over the Docker SDK. |
+| `internal/runtime/dockerclient/fake/` | In-memory Client for runtime tests. |
 | `internal/control/` | WebSocket client to control plane: register, heartbeat, dispatch. |
+| `internal/dispatcher/` | Adapter between control.Dispatcher and runtime.Runtime + telemetry. |
 | `internal/inference/` | Fiber proxy for `/v1/*` to local model containers. |
 | `internal/healthz/` | `/healthz` and `/readyz` handlers. |
 | `docs/` | Project docs. `structure.md` (this file) is the living architecture map. |
@@ -63,7 +65,10 @@ Wraps `github.com/docker/docker/client`. Surfaces only what the launcher needs: 
 - `/readyz` — readiness, returns 200 only after the worker has successfully connected to the control plane at least once.
 
 ### `cmd/worker`
-`main.go` reads config, builds the auth/token store, builds the runtime (docker client + recipes), starts the Fiber server (inference + healthz routes), starts the control channel, blocks on signal.
+`main.go` reads config, builds the auth/token store, builds the runtime (docker client + recipes), starts the Fiber server (inference + healthz routes), starts the control channel, blocks on signal. Wiring only — the testable adapter logic lives in `internal/dispatcher`.
+
+### `internal/dispatcher`
+Adapter between `control.Dispatcher` (what the WS layer needs) and the concrete `runtime.Runtime` + telemetry source. Translates `LoadModelBody → recipes.Plan → runtime.LoadModel`. Composes the periodic heartbeat body. 100% unit-test coverage with a fake runtime.
 
 ## Test layout
 
@@ -74,7 +79,7 @@ Wraps `github.com/docker/docker/client`. Surfaces only what the launcher needs: 
 
 ## Coverage policy
 
-`make coverage` runs unit tests with `-race -coverprofile=coverage.out -covermode=atomic` and fails if total coverage drops below **95%**. Integration tests are excluded from the gate.
+`make coverage` runs `./internal/...` with `-race -tags=integration -coverprofile=coverage.out -covermode=atomic` and fails if total internal coverage drops below **95%**. `cmd/worker` is excluded from the gate because it is the wiring layer (its `main()` cannot be unit-tested). The `-tags=integration` flag enables real-Docker tests in `internal/runtime/dockerclient`; those tests skip cleanly when no Docker daemon is reachable.
 
 ## When to update this file
 
