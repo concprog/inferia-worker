@@ -181,9 +181,13 @@ func (r *Runtime) LoadModel(ctx context.Context, deploymentID string, plan recip
 		return nil, fmt.Errorf("start: %w", err)
 	}
 
-	// Wait for readiness.
+	// Wait for readiness. Probe the container via its name + container-port
+	// on the shared inferia-models network — the worker and the model both
+	// attach to that network, so DNS resolution + intra-bridge routing
+	// succeed without relying on the host's loopback (which would point at
+	// the worker container itself, not the model container).
+	probeURL := fmt.Sprintf("http://%s:%d%s", plan.ContainerName, plan.ContainerPort, plan.ReadyPath)
 	endpoint := fmt.Sprintf("http://%s:%d", r.cfg.AdvertiseHost, hostPort)
-	probeURL := endpoint + plan.ReadyPath
 	if !r.waitReady(ctx, probeURL) {
 		_ = r.cfg.Docker.Stop(ctx, cid, 5)
 		_ = r.cfg.Docker.Remove(ctx, cid)
