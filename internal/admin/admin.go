@@ -61,54 +61,25 @@ func websocketUpgrade(c *fiber.Ctx) error {
 	return fiber.ErrUpgradeRequired
 }
 
-// resolveContainer picks the container to operate on. Preference:
-//  1. query param `container` (raw container ID — operator override)
-//  2. query param `deployment` resolved through the runtime
-//  3. query param `deployment` resolved via docker ps (recovers after a
-//     worker restart that drops the runtime's in-memory deployment map
-//     while the model container is still up)
-//  4. the first loaded deployment when the request omits both
-//
-// Returns ("", error string) if nothing can be resolved.
-func resolveContainer(c *websocket.Conn, rt Runtime, docker *client.Client) (string, string) {
-	if raw := c.Query("container"); raw != "" {
-		return raw, ""
-	}
-	depID := c.Query("deployment")
-	if depID == "" {
-		loaded := rt.LoadedDeployments()
-		if len(loaded) == 0 {
-			// Last-ditch fallback: pick the most recent inferia-managed
-			// container the worker has spawned (helps when the runtime
-			// registry is empty post-restart and no deployment id was
-			// provided).
-			if cid := mostRecentInferiaContainer(docker); cid != "" {
-				return cid, ""
-			}
-			return "", "no active deployment on this worker"
-		}
-		depID = loaded[0]
-	}
-	if cid := rt.ContainerForDeployment(depID); cid != "" {
-		return cid, ""
-	}
-	// Docker fallback: containers are named like inferia-<recipe>-<depID>.
-	if cid := containerByDeploymentID(docker, depID); cid != "" {
-		return cid, ""
-	}
-	return "", fmt.Sprintf("deployment %q has no running container", depID)
+// containerLookup is the narrow surface resolveContainerCore needs to
+// query docker. Real callers use a docker-backed implementation; tests
+// supply a fake. Both methods return "" on miss rather than an error so
+// the core logic can keep the precedence chain in one place.
+type containerLookup interface {
+	ByDeploymentID(depID string) string
+	MostRecent() string
 }
 
-// containerByDeploymentID searches running containers for one whose name
-// ends with the deployment id (the worker names them
-// `inferia-<recipe>-<deploymentID>`).
-func containerByDeploymentID(docker *client.Client, depID string) string {
-	if docker == nil || depID == "" {
+// dockerLookup wires containerLookup to the real Docker SDK client.
+type dockerLookup struct{ cli *client.Client }
+
+func (d dockerLookup) ByDeploymentID(depID string) string {
+	if d.cli == nil || depID == "" {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	list, err := docker.ContainerList(ctx, container.ListOptions{
+	list, err := d.cli.ContainerList(ctx, container.ListOptions{
 		All:     false,
 		Filters: filters.NewArgs(filters.KeyValuePair{Key: "name", Value: depID}),
 	})
@@ -125,23 +96,63 @@ func containerByDeploymentID(docker *client.Client, depID string) string {
 	return list[0].ID
 }
 
-// mostRecentInferiaContainer returns the newest running container whose
-// name carries the `inferia-` prefix the worker uses for model launches.
-// Used as a last-ditch fallback when the request omits a deployment id.
-func mostRecentInferiaContainer(docker *client.Client) string {
-	if docker == nil {
+func (d dockerLookup) MostRecent() string {
+	if d.cli == nil {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	list, err := docker.ContainerList(ctx, container.ListOptions{
+	list, err := d.cli.ContainerList(ctx, container.ListOptions{
 		Filters: filters.NewArgs(filters.KeyValuePair{Key: "name", Value: "inferia-"}),
 	})
 	if err != nil || len(list) == 0 {
 		return ""
 	}
-	// docker returns newest first by default.
 	return list[0].ID
+}
+
+// resolveContainerCore picks the container to operate on. Preference:
+//  1. query param `container` (raw container ID — operator override)
+//  2. query param `deployment` resolved through the runtime
+//  3. query param `deployment` resolved via docker ps (recovers after a
+//     worker restart that drops the runtime's in-memory deployment map
+//     while the model container is still up)
+//  4. the first loaded deployment when the request omits both
+//
+// Returns ("", error string) if nothing can be resolved.
+func resolveContainerCore(getQuery func(string) string, rt Runtime, look containerLookup) (string, string) {
+	if raw := getQuery("container"); raw != "" {
+		return raw, ""
+	}
+	depID := getQuery("deployment")
+	if depID == "" {
+		loaded := rt.LoadedDeployments()
+		if len(loaded) == 0 {
+			// Last-ditch fallback: pick the most recent inferia-managed
+			// container the worker has spawned (helps when the runtime
+			// registry is empty post-restart and no deployment id was
+			// provided).
+			if cid := look.MostRecent(); cid != "" {
+				return cid, ""
+			}
+			return "", "no active deployment on this worker"
+		}
+		depID = loaded[0]
+	}
+	if cid := rt.ContainerForDeployment(depID); cid != "" {
+		return cid, ""
+	}
+	if cid := look.ByDeploymentID(depID); cid != "" {
+		return cid, ""
+	}
+	return "", fmt.Sprintf("deployment %q has no running container", depID)
+}
+
+// resolveContainer is the WS-facing wrapper around resolveContainerCore.
+// Real handlers bind the docker client; tests exercise the core directly.
+func resolveContainer(c *websocket.Conn, rt Runtime, docker *client.Client) (string, string) {
+	getQuery := func(key string) string { return c.Query(key) }
+	return resolveContainerCore(getQuery, rt, dockerLookup{cli: docker})
 }
 
 func sendErr(c *websocket.Conn, detail string) {
