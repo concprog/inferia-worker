@@ -267,6 +267,9 @@ func handleShell(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
 		// at-runtime if exec fails on bash.
 		shellPath = "/bin/bash"
 	}
+	// `user` is forwarded to docker exec --user verbatim. Accepts "name",
+	// "uid", "name:group", or "uid:gid". Empty means "use container default".
+	execUser := c.Query("user")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -277,12 +280,17 @@ func handleShell(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
 		AttachStderr: true,
 		Tty:          true,
 		Cmd:          []string{shellPath},
+		User:         execUser,
 	}
 	created, err := dockerCli.ContainerExecCreate(ctx, containerID, execCfg)
 	if err != nil {
-		// Fallback shell.
-		execCfg.Cmd = []string{"/bin/sh"}
-		created, err = dockerCli.ContainerExecCreate(ctx, containerID, execCfg)
+		// Fallback shell: caller asked for something the image doesn't
+		// ship (e.g. /bin/bash on a distroless container). Retry once with
+		// /bin/sh so the user gets *some* shell rather than a hard error.
+		if shellPath != "/bin/sh" {
+			execCfg.Cmd = []string{"/bin/sh"}
+			created, err = dockerCli.ContainerExecCreate(ctx, containerID, execCfg)
+		}
 		if err != nil {
 			sendErr(c, fmt.Sprintf("exec create: %v", err))
 			return
