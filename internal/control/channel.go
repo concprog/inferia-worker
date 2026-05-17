@@ -105,7 +105,11 @@ func (ch *Channel) readLoop(ctx context.Context, conn *websocket.Conn) error {
 		if err := json.Unmarshal(data, &env); err != nil {
 			continue // skip malformed frames
 		}
-		ch.handle(ctx, conn, env)
+		// Dispatch handle() in a goroutine so a long-running LoadModel
+		// (image pull, container start, readiness wait) doesn't block the
+		// read loop. Blocking the loop starves WS keepalive pongs and the
+		// connection times out client-side.
+		go ch.handle(ctx, conn, env)
 	}
 }
 

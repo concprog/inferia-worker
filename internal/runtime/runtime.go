@@ -122,6 +122,19 @@ func (r *Runtime) EndpointURL(deploymentID string) string {
 	return d.endpointURL
 }
 
+// ContainerForDeployment returns the docker container ID currently running
+// the given deployment, or "" if no such container exists. Used by the
+// admin logs / shell endpoints to target the right container.
+func (r *Runtime) ContainerForDeployment(deploymentID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d, ok := r.deployments[deploymentID]
+	if !ok {
+		return ""
+	}
+	return d.containerID
+}
+
 // LoadModel pulls the image, runs the container, and waits for readiness.
 // Idempotent: a duplicate call for the same deploymentID either waits for the
 // first to finish and returns its result, or — if already running — returns
@@ -181,9 +194,13 @@ func (r *Runtime) LoadModel(ctx context.Context, deploymentID string, plan recip
 		return nil, fmt.Errorf("start: %w", err)
 	}
 
-	// Wait for readiness.
+	// Wait for readiness. Probe the container via its name + container-port
+	// on the shared inferia-models network — the worker and the model both
+	// attach to that network, so DNS resolution + intra-bridge routing
+	// succeed without relying on the host's loopback (which would point at
+	// the worker container itself, not the model container).
+	probeURL := fmt.Sprintf("http://%s:%d%s", plan.ContainerName, plan.ContainerPort, plan.ReadyPath)
 	endpoint := fmt.Sprintf("http://%s:%d", r.cfg.AdvertiseHost, hostPort)
-	probeURL := endpoint + plan.ReadyPath
 	if !r.waitReady(ctx, probeURL) {
 		_ = r.cfg.Docker.Stop(ctx, cid, 5)
 		_ = r.cfg.Docker.Remove(ctx, cid)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
@@ -47,6 +48,17 @@ func NewEngine(dockerHost string) (Client, error) {
 	return &dockerEngine{cli: c}, nil
 }
 
+// Raw returns the underlying Docker SDK client. Exposed for auxiliary
+// endpoints (admin/logs, admin/shell) that need APIs beyond the narrow
+// Client interface — specifically streaming ContainerLogs and exec
+// hijack, which would clutter the test fake otherwise.
+func (e *dockerEngine) Raw() *client.Client { return e.cli }
+
+// RawAccessor is implemented by clients that wrap the real Docker SDK.
+type RawAccessor interface {
+	Raw() *client.Client
+}
+
 type dockerEngine struct {
 	cli *client.Client
 }
@@ -61,16 +73,42 @@ func (e *dockerEngine) EnsureNetwork(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	found := false
 	for _, n := range nets {
 		if n.Name == name {
-			return nil
+			found = true
+			break
 		}
 	}
-	_, err = e.cli.NetworkCreate(ctx, name, network.CreateOptions{
-		Driver: "bridge",
-		Labels: map[string]string{"inferia.managed_by": "inferia-worker"},
-	})
-	return err
+	if !found {
+		if _, err = e.cli.NetworkCreate(ctx, name, network.CreateOptions{
+			Driver: "bridge",
+			Labels: map[string]string{"inferia.managed_by": "inferia-worker"},
+		}); err != nil {
+			return err
+		}
+	}
+	// Self-attach to the network so the worker can resolve sibling model
+	// containers by name during readiness probes. The hostname of a Docker
+	// container is the first 12 chars of its ID by default; ContainerInspect
+	// accepts that as the ID.
+	host, herr := os.Hostname()
+	if herr != nil || host == "" {
+		return nil // best-effort
+	}
+	info, ierr := e.cli.ContainerInspect(ctx, host)
+	if ierr != nil {
+		return nil // not running as a container, or short-id mismatch
+	}
+	if _, attached := info.NetworkSettings.Networks[name]; attached {
+		return nil
+	}
+	if cerr := e.cli.NetworkConnect(ctx, name, info.ID, nil); cerr != nil {
+		// Don't fail boot — operator can always attach manually if this
+		// fails on their host.
+		return nil
+	}
+	return nil
 }
 
 func (e *dockerEngine) Pull(ctx context.Context, img string) error {
