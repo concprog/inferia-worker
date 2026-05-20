@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -159,9 +160,9 @@ func TestDetect_IMDSPayloadOversizeIsBounded(t *testing.T) {
 }
 
 func TestDetect_Cached(t *testing.T) {
-	hits := 0
+	var hits atomic.Int64
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
+		hits.Add(1)
 		if r.Method == http.MethodPut {
 			w.Write([]byte("tok"))
 			return
@@ -183,7 +184,7 @@ func TestDetect_Cached(t *testing.T) {
 	_ = Detect()
 	_ = Detect()
 	_ = Detect()
-	if hits > 2 {
-		t.Fatalf("expected at most 2 IMDS hits (PUT + GET), got %d", hits)
+	if h := hits.Load(); h < 1 || h > 2 {
+		t.Fatalf("expected 1-2 IMDS hits (PUT + GET), got %d", h)
 	}
 }
