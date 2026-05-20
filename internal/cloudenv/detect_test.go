@@ -1,6 +1,8 @@
 package cloudenv
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 )
@@ -76,5 +78,112 @@ func TestDetect_CacheReturnsSameValue(t *testing.T) {
 	}
 	if third != first {
 		t.Errorf("third call differs: got %+v, want %+v", third, first)
+	}
+}
+
+func TestDetect_IMDSv2Success(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/latest/api/token":
+			if r.Header.Get("X-aws-ec2-metadata-token-ttl-seconds") == "" {
+				t.Errorf("missing TTL header")
+			}
+			w.Write([]byte("imds-token-abc"))
+		case r.Method == http.MethodGet && r.URL.Path == "/latest/dynamic/instance-identity/document":
+			if r.Header.Get("X-aws-ec2-metadata-token") != "imds-token-abc" {
+				t.Errorf("missing/wrong token")
+			}
+			w.Write([]byte(`{"instanceId":"i-real","region":"eu-west-2","availabilityZone":"eu-west-2b"}`))
+		default:
+			http.Error(w, "unexpected", 400)
+		}
+	}))
+	defer ts.Close()
+	t.Setenv("INFERIA_CLOUDENV_IMDS_URL", ts.URL)
+	t.Setenv("INFERIA_RUNTIME_ENV", "")
+
+	got := detectFresh()
+	if got.Kind != KindAWSEC2 || got.InstanceID != "i-real" || got.Region != "eu-west-2" || got.AvailabilityZone != "eu-west-2b" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestDetect_IMDSv1Disabled(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Reject any GET without a token (IMDSv1 disabled), accept PUT.
+		if r.Method == http.MethodPut {
+			w.Write([]byte("tok"))
+			return
+		}
+		if r.Header.Get("X-aws-ec2-metadata-token") == "tok" {
+			w.Write([]byte(`{"instanceId":"i-v2","region":"us-west-2","availabilityZone":"us-west-2c"}`))
+			return
+		}
+		http.Error(w, "v1 disabled", 401)
+	}))
+	defer ts.Close()
+	t.Setenv("INFERIA_CLOUDENV_IMDS_URL", ts.URL)
+	t.Setenv("INFERIA_RUNTIME_ENV", "")
+
+	got := detectFresh()
+	if got.Kind != KindAWSEC2 || got.InstanceID != "i-v2" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestDetect_IMDSPayloadOversizeIsBounded(t *testing.T) {
+	// Server returns a 1 MB JSON document. We should not OOM; we should fail
+	// to parse and fall back to KindLocal.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			w.Write([]byte("tok"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		padding := make([]byte, 1024*1024)
+		for i := range padding {
+			padding[i] = 'x'
+		}
+		w.Write([]byte(`{"instanceId":"i","region":"r","availabilityZone":"a","pad":"`))
+		w.Write(padding)
+		w.Write([]byte(`"}`))
+	}))
+	defer ts.Close()
+	t.Setenv("INFERIA_CLOUDENV_IMDS_URL", ts.URL)
+	t.Setenv("INFERIA_RUNTIME_ENV", "")
+
+	got := detectFresh()
+	if got.Kind != KindLocal {
+		t.Fatalf("oversize payload should fall back to local, got %+v", got)
+	}
+}
+
+func TestDetect_Cached(t *testing.T) {
+	hits := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.Method == http.MethodPut {
+			w.Write([]byte("tok"))
+			return
+		}
+		w.Write([]byte(`{"instanceId":"i","region":"r","availabilityZone":"a"}`))
+	}))
+	defer ts.Close()
+	t.Setenv("INFERIA_CLOUDENV_IMDS_URL", ts.URL)
+	t.Setenv("INFERIA_RUNTIME_ENV", "")
+
+	// Reset the package-level cache for a clean test.
+	cacheOnce = sync.Once{}
+	cached = RuntimeInfo{}
+	t.Cleanup(func() {
+		cacheOnce = sync.Once{}
+		cached = RuntimeInfo{}
+	})
+
+	_ = Detect()
+	_ = Detect()
+	_ = Detect()
+	if hits > 2 {
+		t.Fatalf("expected at most 2 IMDS hits (PUT + GET), got %d", hits)
 	}
 }
