@@ -196,3 +196,38 @@ func TestOllamaPull_RejectsShellMetaName(t *testing.T) {
 		}
 	}
 }
+
+func TestOllamaPull_TerminalStatusNotSuccess(t *testing.T) {
+	host, stop := newOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"status":"pulling"}`+"\n"+`{"error":"manifest not found"}`)
+	})
+	defer stop()
+	err := ollamaPull(context.Background(), "http://"+host, "qwen3:0.6b", 5*time.Second)
+	if err == nil {
+		t.Fatalf("err = nil, want non-nil")
+	}
+}
+
+func TestOllamaPull_EmptyBody(t *testing.T) {
+	host, stop := newOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	defer stop()
+	err := ollamaPull(context.Background(), "http://"+host, "qwen3:0.6b", 5*time.Second)
+	if err == nil {
+		t.Fatalf("err = nil, want non-nil")
+	}
+}
+
+func TestOllamaPull_UnparseableBody(t *testing.T) {
+	host, stop := newOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `not json`)
+	})
+	defer stop()
+	err := ollamaPull(context.Background(), "http://"+host, "qwen3:0.6b", 5*time.Second)
+	if err == nil {
+		t.Fatalf("err = nil, want non-nil")
+	}
+}
