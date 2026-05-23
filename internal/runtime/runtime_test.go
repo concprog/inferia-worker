@@ -3,8 +3,10 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -292,3 +294,115 @@ func contains(ss []string, want string) bool {
 
 // silence unused warning when only some tests reference these types
 var _ dockerclient.Client = (*fake.Client)(nil)
+
+// ollamaSamplePlan builds a minimal ollama Plan for integration tests.
+// deploymentID is omitted — it is passed separately to LoadModel.
+func ollamaSamplePlan(containerName, model string, port int) recipes.Plan {
+	return recipes.Plan{
+		Image:         "ollama/ollama:latest",
+		ContainerName: containerName,
+		Cmd:           []string{"serve"},
+		Env:           map[string]string{"INFERIA_OLLAMA_MODEL": model},
+		ContainerPort: port,
+		HostPort:      port,
+		ReadyPath:     "/",
+	}
+}
+
+func TestLoadModel_OllamaPullsAfterReady(t *testing.T) {
+	// Stand up a fake ollama server that records the pull.
+	var pulled int
+	pullSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/pull" {
+			pulled++
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"success"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer pullSrv.Close()
+
+	u, err := url.Parse(pullSrv.URL)
+	if err != nil {
+		t.Fatalf("parse pull url: %v", err)
+	}
+	_, portStr, _ := strings.Cut(u.Host, ":")
+	var port int
+	_, _ = fmt.Sscanf(portStr, "%d", &port)
+
+	fc := fake.New()
+	rt := newRT(t, fc, okProbe)
+
+	// Use the httptest server's host directly as ContainerName so the pull
+	// reaches our fake server via the in-process network.
+	plan := ollamaSamplePlan("inferia-ollama-dep-1", "qwen3:0.6b", port)
+	plan.ContainerName = u.Hostname()
+
+	_, err = rt.LoadModel(context.Background(), "dep-1", plan)
+	if err != nil {
+		t.Fatalf("LoadModel: %v", err)
+	}
+	if pulled != 1 {
+		t.Errorf("ollama /api/pull called %d times, want 1", pulled)
+	}
+	if !contains(rt.LoadedDeployments(), "dep-1") {
+		t.Errorf("deployment not loaded after successful pull")
+	}
+}
+
+func TestLoadModel_OllamaPullFailure_CleansUp(t *testing.T) {
+	// Server returns 4xx for /api/pull → no retry, immediate failure.
+	pullSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/pull" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"manifest not found"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer pullSrv.Close()
+
+	u, _ := url.Parse(pullSrv.URL)
+	_, portStr, _ := strings.Cut(u.Host, ":")
+	var port int
+	_, _ = fmt.Sscanf(portStr, "%d", &port)
+
+	fc := fake.New()
+	rt := newRT(t, fc, okProbe)
+
+	plan := ollamaSamplePlan("inferia-ollama-dep-1", "qwen3:0.6b", port)
+	plan.ContainerName = u.Hostname()
+
+	_, err := rt.LoadModel(context.Background(), "dep-1", plan)
+	if err == nil {
+		t.Fatalf("expected pull failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "ollama pull-after-ready") {
+		t.Errorf("error %q does not mention pull-after-ready", err)
+	}
+	if len(fc.Removed) != 1 {
+		t.Errorf("expected 1 container remove on pull failure, got %d", len(fc.Removed))
+	}
+	if contains(rt.LoadedDeployments(), "dep-1") {
+		t.Errorf("failed deployment should not be loaded")
+	}
+}
+
+func TestLoadModel_NonOllamaRecipe_DoesNotPull(t *testing.T) {
+	// Track pulls; vllm should never hit /api/pull.
+	pullSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/pull" {
+			t.Errorf("vllm recipe must not call /api/pull")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer pullSrv.Close()
+
+	fc := fake.New()
+	rt := newRT(t, fc, okProbe)
+	_, err := rt.LoadModel(context.Background(), "dep-1", samplePlan("dep-1")) // vllm
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+}

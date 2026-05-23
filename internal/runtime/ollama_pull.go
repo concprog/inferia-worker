@@ -9,7 +9,12 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/inferia/inferia-worker/internal/runtime/recipes"
 )
+
+// recipesPlan is a local alias so helper signatures stay small.
+type recipesPlan = recipes.Plan
 
 // ollamaPull POSTs /api/pull to the local Ollama container at endpoint and
 // waits for completion. endpoint is host:port form (no trailing slash, no path).
@@ -111,4 +116,17 @@ func truncate(b []byte, n int) string {
 		return string(b)
 	}
 	return string(b[:n]) + "…"
+}
+
+// ollamaPullIfNeeded runs ollamaPull for ollama-recipe deployments. It is a
+// no-op for non-ollama containers (detected by the presence of the
+// INFERIA_OLLAMA_MODEL env var). The endpoint is the in-network address of
+// the model container (same shape the readiness probe uses).
+func ollamaPullIfNeeded(ctx context.Context, plan recipesPlan, timeout time.Duration) error {
+	model := plan.Env["INFERIA_OLLAMA_MODEL"]
+	if model == "" {
+		return nil // not an ollama recipe
+	}
+	endpoint := fmt.Sprintf("http://%s:%d", plan.ContainerName, plan.ContainerPort)
+	return ollamaPull(ctx, endpoint, model, timeout)
 }
