@@ -133,3 +133,33 @@ func TestOllamaPull_4xxNotRetried(t *testing.T) {
 		t.Errorf("calls = %d, want 1 (no retry on 4xx)", calls)
 	}
 }
+
+func TestOllamaPull_Timeout(t *testing.T) {
+	host, stop := newOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"status":"success"}`)
+	})
+	defer stop()
+
+	start := time.Now()
+	err := ollamaPull(context.Background(), "http://"+host, "qwen3:0.6b", 100*time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("err = nil, want timeout")
+	}
+	if elapsed > 400*time.Millisecond {
+		t.Errorf("elapsed = %v, want quick timeout < 400ms", elapsed)
+	}
+}
+
+func TestOllamaPull_NetworkError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	host := srv.Listener.Addr().String()
+	srv.Close()
+
+	err := ollamaPull(context.Background(), "http://"+host, "qwen3:0.6b", 200*time.Millisecond)
+	if err == nil {
+		t.Fatalf("err = nil, want network error")
+	}
+}
