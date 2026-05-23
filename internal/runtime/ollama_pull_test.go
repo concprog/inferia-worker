@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -161,5 +162,37 @@ func TestOllamaPull_NetworkError(t *testing.T) {
 	err := ollamaPull(context.Background(), "http://"+host, "qwen3:0.6b", 200*time.Millisecond)
 	if err == nil {
 		t.Fatalf("err = nil, want network error")
+	}
+}
+
+func TestOllamaPull_RejectsEmptyName(t *testing.T) {
+	err := ollamaPull(context.Background(), "http://127.0.0.1:1", "", 5*time.Second)
+	if err == nil {
+		t.Fatalf("err = nil, want validation failure")
+	}
+}
+
+func TestOllamaPull_RejectsOversizedName(t *testing.T) {
+	name := strings.Repeat("a", 257)
+	err := ollamaPull(context.Background(), "http://127.0.0.1:1", name, 5*time.Second)
+	if err == nil {
+		t.Fatalf("err = nil, want validation failure")
+	}
+}
+
+func TestOllamaPull_RejectsShellMetaName(t *testing.T) {
+	for _, n := range []string{
+		"qwen3;rm -rf /",
+		"qwen3|cat",
+		"qwen3`whoami`",
+		"qwen3$PATH",
+		"qwen3>file",
+		"qwen3<file",
+		"line1\nline2",
+	} {
+		err := ollamaPull(context.Background(), "http://127.0.0.1:1", n, 5*time.Second)
+		if err == nil {
+			t.Errorf("err = nil for name=%q, want validation failure", n)
+		}
 	}
 }
