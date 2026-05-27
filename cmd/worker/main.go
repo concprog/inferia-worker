@@ -154,6 +154,12 @@ func main() {
 		admin.Register(app, raw.Raw(), rt)
 		shellbridge.SetDockerClient(raw.Raw(), rt)
 		shellbridge.SetDockerLogsBackend(raw.Raw(), rt)
+		// Host-shell mode: untargeted ShellOpen frames (empty deployment_id
+		// and empty container_id) land here. Implemented as a privileged
+		// sidecar + nsenter so the operator gets a real shell on the EC2
+		// host rather than docker-exec'ing into the distroless worker
+		// container.
+		shellbridge.SetHostShellBackend(raw.Raw())
 	} else {
 		log.Printf("admin endpoints: docker client does not expose Raw(); logs/shell tabs disabled")
 	}

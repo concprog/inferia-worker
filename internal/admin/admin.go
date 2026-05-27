@@ -191,11 +191,24 @@ func handleLogs(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
 // --- /v1/shell --------------------------------------------------------------
 
 func handleShell(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
-	cid, errMsg := shellbridge.ResolveContainer(dockerCli, shellbridgeRuntime{rt},
-		c.Query("container"), c.Query("deployment"))
-	if errMsg != nil {
-		sendErr(c, errMsg.Error())
-		return
+	rawContainer := c.Query("container")
+	rawDeployment := c.Query("deployment")
+	// hostMode mirrors the channel-tunnel routing: when the caller pinned
+	// neither a container nor a deployment, fall through to a host-shell
+	// session (privileged sidecar + nsenter) rather than trying to
+	// resolve "first running container". The worker container itself is
+	// distroless and would fail any subsequent /bin/sh exec.
+	hostMode := rawContainer == "" && rawDeployment == ""
+
+	var cid string
+	if !hostMode {
+		resolved, errMsg := shellbridge.ResolveContainer(dockerCli, shellbridgeRuntime{rt},
+			rawContainer, rawDeployment)
+		if errMsg != nil {
+			sendErr(c, errMsg.Error())
+			return
+		}
+		cid = resolved
 	}
 	shellPath := c.Query("shell")
 	if shellPath == "" {
@@ -215,12 +228,23 @@ func handleShell(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
 		return c.WriteJSON(payload)
 	}
 
+	// Per-call factory so the admin path stays independent of shellbridge
+	// package globals (and so the existing tests don't have to mutate
+	// DefaultSpawn / DefaultHostSpawn). Same docker client either way —
+	// the host backend wraps a sidecar around the same daemon connection.
+	backendFactory := func(cfg shellbridge.ShellSessionConfig) (shellbridge.ShellBackend, error) {
+		if hostMode {
+			return shellbridge.NewHostShellBackend(dockerCli), nil
+		}
+		return shellbridge.NewDockerShellBackend(dockerCli, cid), nil
+	}
+
 	sess, err := shellbridge.StartShellWithBackend(ctx,
 		shellbridge.ShellSessionConfig{
 			Shell:      shellPath,
 			User:       execUser,
 			Container:  cid,
-			Deployment: "", // already resolved into Container
+			Deployment: "", // already resolved into Container (docker mode) or empty (host mode)
 			OnOutput: func(data []byte) {
 				_ = emit(map[string]any{"type": "output", "data": string(data)})
 			},
@@ -233,9 +257,7 @@ func handleShell(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
 				cancel()
 			},
 		},
-		func(cfg shellbridge.ShellSessionConfig) (shellbridge.ShellBackend, error) {
-			return shellbridge.NewDockerShellBackend(dockerCli, cid), nil
-		},
+		backendFactory,
 	)
 	if err != nil {
 		sendErr(c, err.Error())
@@ -273,7 +295,11 @@ func handleShell(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
 		}
 		_ = sess.WriteInput(msg)
 	}
-	log.Printf("shell session for %s ended", cid)
+	target := cid
+	if hostMode {
+		target = "host"
+	}
+	log.Printf("shell session for %s ended", target)
 }
 
 func toInt(v any) (int, bool) {

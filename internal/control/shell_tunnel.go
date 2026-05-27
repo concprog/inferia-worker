@@ -36,11 +36,13 @@ type logsStarter func(ctx context.Context, cfg shellbridge.LogsSessionConfig) (*
 // to forward output to.
 type ChannelShellTunnel struct {
 	sender envelopeSender
-	// startShell / startLogs default to shellbridge.StartShell /
-	// shellbridge.StartLogs in production. Tests override them via
-	// NewChannelShellTunnelForTest.
-	startShell shellStarter
-	startLogs  logsStarter
+	// startShell / startHostShell / startLogs default to the matching
+	// shellbridge entry points in production. Tests override them via
+	// NewChannelShellTunnelForTest so they can plug fake backends without
+	// touching package globals.
+	startShell     shellStarter
+	startHostShell shellStarter
+	startLogs      logsStarter
 
 	mu       sync.Mutex
 	shells   map[string]*shellbridge.ShellSession
@@ -49,26 +51,50 @@ type ChannelShellTunnel struct {
 }
 
 // NewChannelShellTunnel returns a tunnel ready to receive CP envelopes.
+// Production routing: ShellOpen frames with a deployment_id or
+// container_id flow through shellbridge.StartShell (docker exec into the
+// model container). Frames with neither flow through StartHostShell, which
+// spawns a privileged sidecar that nsenters into the host's namespaces.
+// The latter is the only path the dashboard's "Shell" tab uses when no
+// deployment is selected.
 func NewChannelShellTunnel(sender envelopeSender) *ChannelShellTunnel {
 	return &ChannelShellTunnel{
-		sender:     sender,
-		startShell: shellbridge.StartShell,
-		startLogs:  shellbridge.StartLogs,
-		shells:     map[string]*shellbridge.ShellSession{},
-		logs:       map[string]*shellbridge.LogsSession{},
+		sender:         sender,
+		startShell:     shellbridge.StartShell,
+		startHostShell: shellbridge.StartHostShell,
+		startLogs:      shellbridge.StartLogs,
+		shells:         map[string]*shellbridge.ShellSession{},
+		logs:           map[string]*shellbridge.LogsSession{},
 	}
 }
 
 // NewChannelShellTunnelForTest constructs a tunnel with explicit starter
 // callbacks so tests can plug a fake backend without touching package
-// globals. Either starter may be nil; the tunnel routes accordingly.
+// globals. Either starter may be nil; the tunnel routes accordingly. The
+// host-shell starter defaults to the same fake as the docker starter so
+// existing tests don't need to change — tests that exercise the routing
+// distinction supply both explicitly via WithHostStarter.
 func NewChannelShellTunnelForTest(sender envelopeSender, shellStart shellStarter, logsStart logsStarter) *ChannelShellTunnel {
 	t := NewChannelShellTunnel(sender)
 	if shellStart != nil {
 		t.startShell = shellStart
+		// Default the host starter to the same callback so existing tests
+		// that pass empty targets still get their fake backend invoked.
+		t.startHostShell = shellStart
 	}
 	if logsStart != nil {
 		t.startLogs = logsStart
+	}
+	return t
+}
+
+// WithHostStarter overrides only the host-shell starter, leaving the
+// docker starter untouched. Used by tests that need to assert "empty
+// target routes to host, not docker" without bleeding the same fake into
+// both paths.
+func (t *ChannelShellTunnel) WithHostStarter(s shellStarter) *ChannelShellTunnel {
+	if s != nil {
+		t.startHostShell = s
 	}
 	return t
 }
@@ -206,7 +232,20 @@ func (t *ChannelShellTunnel) handleShellOpen(ctx context.Context, body ShellOpen
 			})
 		},
 	}
-	sess, err := t.startShell(ctx, cfg)
+	// Route empty-target ShellOpen frames to the host-shell backend so a
+	// fresh worker (with no deployments loaded) still exposes a usable
+	// shell to operators. Any explicit deployment_id or container_id
+	// keeps the existing docker-exec path. Picking the starter here, not
+	// inside shellbridge, keeps the routing decision visible at the
+	// protocol boundary — the package-level DefaultSpawn / DefaultHostSpawn
+	// indirection only handles backend construction.
+	starter := t.startShell
+	if body.DeploymentID == "" && body.ContainerID == "" {
+		if t.startHostShell != nil {
+			starter = t.startHostShell
+		}
+	}
+	sess, err := starter(ctx, cfg)
 	if err != nil {
 		t.sendError(streamID, err.Error())
 		return
