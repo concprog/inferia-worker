@@ -194,13 +194,17 @@ func (r *Runtime) LoadModel(ctx context.Context, deploymentID string, plan recip
 		return nil, fmt.Errorf("start: %w", err)
 	}
 
-	// Wait for readiness. Probe the container via its name + container-port
-	// on the shared inferia-models network — the worker and the model both
-	// attach to that network, so DNS resolution + intra-bridge routing
-	// succeed without relying on the host's loopback (which would point at
-	// the worker container itself, not the model container).
-	probeURL := fmt.Sprintf("http://%s:%d%s", plan.ContainerName, plan.ContainerPort, plan.ReadyPath)
+	// Wait for readiness. Probe the model container at the SAME address the
+	// inference proxy will route to: AdvertiseHost:hostPort (the host-bound
+	// port). The worker runs with `--network host` (see the AWS bootstrap),
+	// so it shares the host network namespace — the model container's
+	// 127.0.0.1:<hostPort> host binding is reachable, but a bridge container
+	// NAME is NOT resolvable from host-network. Probing by container name
+	// (the previous behaviour) therefore always timed out on the AWS path →
+	// the worker killed the freshly-loaded container after ReadinessTimeout.
+	// Probing the host-bound endpoint keeps probe + proxy consistent.
 	endpoint := fmt.Sprintf("http://%s:%d", r.cfg.AdvertiseHost, hostPort)
+	probeURL := endpoint + plan.ReadyPath
 	if !r.waitReady(ctx, probeURL) {
 		_ = r.cfg.Docker.Stop(ctx, cid, 5)
 		_ = r.cfg.Docker.Remove(ctx, cid)
