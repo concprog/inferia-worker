@@ -260,3 +260,55 @@ func TestOllamaPull_LongErrorBodyTruncated(t *testing.T) {
 		t.Errorf("err = %v, want truncated body marker", err)
 	}
 }
+
+func TestOllamaPullIfNeeded_RetagsToServedName(t *testing.T) {
+	var pulled, copied map[string]any
+	host, stop := newOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/pull":
+			_ = json.NewDecoder(r.Body).Decode(&pulled)
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+		case "/api/copy":
+			_ = json.NewDecoder(r.Body).Decode(&copied)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	})
+	defer stop()
+
+	plan := recipesPlan{Env: map[string]string{
+		"INFERIA_OLLAMA_MODEL":        "inferiallm.wlan0.in/library/gemma3:4b",
+		"INFERIA_OLLAMA_SERVED_NAME":  "gemma3:4b",
+	}}
+	if err := ollamaPullIfNeeded(context.Background(), plan, "http://"+host, 5*time.Second); err != nil {
+		t.Fatalf("ollamaPullIfNeeded: %v", err)
+	}
+	if pulled["name"] != "inferiallm.wlan0.in/library/gemma3:4b" {
+		t.Errorf("pulled name = %v, want the mirror ref", pulled["name"])
+	}
+	if copied["source"] != "inferiallm.wlan0.in/library/gemma3:4b" || copied["destination"] != "gemma3:4b" {
+		t.Errorf("copy = %v, want source=mirror-ref destination=gemma3:4b", copied)
+	}
+}
+
+func TestOllamaPullIfNeeded_NoRetagWhenServedEqualsModel(t *testing.T) {
+	copyCalled := false
+	host, stop := newOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/copy" {
+			copyCalled = true
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+	})
+	defer stop()
+	// No served name (non-mirror deploy): pull only, no copy.
+	plan := recipesPlan{Env: map[string]string{"INFERIA_OLLAMA_MODEL": "gemma3:4b"}}
+	if err := ollamaPullIfNeeded(context.Background(), plan, "http://"+host, 5*time.Second); err != nil {
+		t.Fatalf("ollamaPullIfNeeded: %v", err)
+	}
+	if copyCalled {
+		t.Errorf("api/copy must NOT be called when there is no served-name re-tag")
+	}
+}

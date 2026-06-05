@@ -131,5 +131,52 @@ func ollamaPullIfNeeded(ctx context.Context, plan recipesPlan, endpoint string, 
 	if model == "" {
 		return nil // not an ollama recipe
 	}
-	return ollamaPull(ctx, endpoint, model, timeout)
+	if err := ollamaPull(ctx, endpoint, model, timeout); err != nil {
+		return err
+	}
+	// When the model was pulled from the CP cache mirror, INFERIA_OLLAMA_MODEL
+	// is a host-prefixed ref (e.g. "inferiallm.wlan0.in/library/gemma3:4b") so
+	// ollama hits the mirror registry. But ollama then serves it under THAT
+	// name, while inference requests carry the bare deployment model id
+	// ("gemma3:4b") -> model-not-found. Re-tag the pulled model to the bare
+	// served name so inference resolves. No-op when not mirroring (served name
+	// absent or already equal to the pulled ref).
+	served := plan.Env["INFERIA_OLLAMA_SERVED_NAME"]
+	if served != "" && served != model {
+		if err := ollamaCopy(ctx, endpoint, model, served, timeout); err != nil {
+			return fmt.Errorf("ollama re-tag mirror ref to served name: %w", err)
+		}
+	}
+	return nil
+}
+
+// ollamaCopy POSTs /api/copy to alias an already-pulled model under a second
+// name (ollama's `ollama cp`). Used to re-tag a CP-mirror ref to the bare
+// served name. Bounded by timeout.
+func ollamaCopy(ctx context.Context, endpoint, source, destination string, timeout time.Duration) error {
+	if err := validateOllamaModelName(source); err != nil {
+		return fmt.Errorf("ollama copy source: %w", err)
+	}
+	if err := validateOllamaModelName(destination); err != nil {
+		return fmt.Errorf("ollama copy destination: %w", err)
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	body, _ := json.Marshal(map[string]any{"source": source, "destination": destination})
+	req, err := http.NewRequestWithContext(cctx, http.MethodPost,
+		strings.TrimRight(endpoint, "/")+"/api/copy", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("ollama copy: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("ollama copy: post: %w", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("ollama copy: status=%d body=%s", resp.StatusCode, truncate(raw, 256))
+	}
+	return nil
 }
