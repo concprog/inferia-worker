@@ -34,6 +34,8 @@ type TelemetryReader interface {
 type Dispatcher struct {
 	Rt        Runtime
 	Telemetry TelemetryReader
+	GPUName   string // populated by main.go from telemetry.ReadGPU()
+	GPUMemMiB uint64 // populated by main.go from telemetry.ReadGPU()
 }
 
 // LoadModel converts the WS body into a recipes.Plan and asks the runtime to
@@ -57,6 +59,8 @@ func (d *Dispatcher) LoadModel(ctx context.Context, body control.LoadModelBody) 
 		GPUIndices:   body.GPUIndices,
 		HostPort:     port,
 		Env:          body.Env,
+		GPUName:      d.GPUName,
+		GPUMemoryMiB: d.GPUMemMiB,
 	})
 	if err != nil {
 		return "", err

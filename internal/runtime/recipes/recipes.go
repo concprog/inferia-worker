@@ -38,6 +38,8 @@ type BuildInput struct {
 	GPUIndices   []int
 	HostPort     int
 	Env          map[string]string
+	GPUName      string // populated by dispatcher from telemetry.ReadGPU()
+	GPUMemoryMiB uint64 // populated by dispatcher from telemetry.ReadGPU()
 }
 
 // Recipe builds a Plan for a particular engine/runtime.
