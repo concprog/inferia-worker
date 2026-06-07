@@ -14,6 +14,10 @@ func (r vllmRecipe) BuildPlan(in BuildInput) (Plan, error) {
 	if err := validate(in); err != nil {
 		return Plan{}, err
 	}
+	// vLLM is GPU-only: enforce at least one index after shared validation.
+	if err := requireGPU(in); err != nil {
+		return Plan{}, err
+	}
 	model := stripScheme(in.ArtifactURI)
 	cfg := sanitiseConfig(in.Config)
 

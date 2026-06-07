@@ -15,6 +15,21 @@ const (
 	MsgUnloadModel   MessageType = "UnloadModel"
 	MsgCommandResult MessageType = "CommandResult"
 	MsgPing          MessageType = "Ping"
+
+	// Shell + logs stream multiplexing over the worker→CP channel.
+	// CP → worker (control side):
+	MsgShellOpen   MessageType = "ShellOpen"
+	MsgShellInput  MessageType = "ShellInput"
+	MsgShellResize MessageType = "ShellResize"
+	MsgShellClose  MessageType = "ShellClose"
+	MsgLogsOpen    MessageType = "LogsOpen"
+	MsgLogsClose   MessageType = "LogsClose"
+	// worker → CP (data side):
+	MsgShellOutput MessageType = "ShellOutput"
+	MsgShellExit   MessageType = "ShellExit"
+	MsgShellError  MessageType = "ShellError"
+	MsgLogsLine    MessageType = "LogsLine"
+	MsgLogsEnd     MessageType = "LogsEnd"
 )
 
 // Envelope wraps every frame. id is a UUIDv4 used for command/response
@@ -28,10 +43,15 @@ type Envelope struct {
 
 // RegisterRequest is the bootstrap-time POST body.
 type RegisterRequest struct {
-	NodeName     string            `json:"node_name"`
-	PoolID       string            `json:"pool_id"`
-	AdvertiseURL string            `json:"advertise_url"`
-	Allocatable  map[string]string `json:"allocatable"`
+	NodeName         string            `json:"node_name"`
+	PoolID           string            `json:"pool_id"`
+	AdvertiseURL     string            `json:"advertise_url,omitempty"`
+	Allocatable      map[string]string `json:"allocatable"`
+	RuntimeEnv       string            `json:"runtime_env,omitempty"`
+	InstanceID       string            `json:"instance_id,omitempty"`
+	Region           string            `json:"region,omitempty"`
+	AvailabilityZone string            `json:"availability_zone,omitempty"`
+	BootstrapToken   string            `json:"bootstrap_token,omitempty"`
 }
 
 // RegisterResponse is the control plane's reply.
@@ -40,10 +60,17 @@ type RegisterResponse struct {
 	WorkerJWT string `json:"worker_jwt"`
 }
 
-// HelloBody is sent by the control plane immediately after WS upgrade.
+// HelloBody is the body of a Hello frame. The control plane sends it to the
+// worker immediately after WS upgrade (carrying server_time and channel_id).
+// The worker echoes cloud-env fields back so the CP can refresh
+// compute_inventory.labels on every reconnect, not just on first register.
 type HelloBody struct {
-	ServerTime time.Time `json:"server_time"`
-	ChannelID  string    `json:"channel_id"`
+	ServerTime       *time.Time `json:"server_time,omitempty"`
+	ChannelID        string    `json:"channel_id,omitempty"`
+	RuntimeEnv       string    `json:"runtime_env,omitempty"`
+	InstanceID       string    `json:"instance_id,omitempty"`
+	Region           string    `json:"region,omitempty"`
+	AvailabilityZone string    `json:"availability_zone,omitempty"`
 }
 
 // HeartbeatBody is what the worker sends every interval. used is a map of
@@ -92,4 +119,97 @@ type CommandResultBody struct {
 	Status      string `json:"status"` // "ok" | "failed"
 	Detail      string `json:"detail,omitempty"`
 	EndpointURL string `json:"endpoint_url,omitempty"`
+}
+
+// --- Shell + logs stream multiplexing ---------------------------------------
+//
+// A single worker→CP control channel carries many concurrent shell + logs
+// sessions, each identified by a stream_id minted by the CP. Frames flow in
+// both directions; the channel read loop on each end dispatches by type and
+// routes to the appropriate session. Field shapes mirror the Pydantic models
+// in InferiaLLM's worker_controller/protocol.py — keep both sides in sync.
+
+// ShellOpenBody is CP→worker: spawn an interactive shell session. The worker
+// exec's shell in the target container (if given) or on the host. user
+// switches uid via the same mechanism the legacy /v1/shell endpoint uses
+// (e.g. "root" or "1000:1000"). cols/rows set the initial PTY window size.
+type ShellOpenBody struct {
+	StreamID     string `json:"stream_id"`
+	Shell        string `json:"shell,omitempty"`
+	User         string `json:"user,omitempty"`
+	DeploymentID string `json:"deployment_id,omitempty"`
+	ContainerID  string `json:"container_id,omitempty"`
+	Cols         int    `json:"cols,omitempty"`
+	Rows         int    `json:"rows,omitempty"`
+}
+
+// ShellInputBody is CP→worker: write bytes to the running shell's stdin.
+// data is raw stdin (may include control chars like ^C).
+type ShellInputBody struct {
+	StreamID string `json:"stream_id"`
+	Data     string `json:"data"`
+}
+
+// ShellResizeBody is CP→worker: resize the shell's PTY window.
+type ShellResizeBody struct {
+	StreamID string `json:"stream_id"`
+	Cols     int    `json:"cols"`
+	Rows     int    `json:"rows"`
+}
+
+// ShellCloseBody is CP→worker: kill the shell and tear down the session.
+// Idempotent — worker ignores unknown stream_ids.
+type ShellCloseBody struct {
+	StreamID string `json:"stream_id"`
+}
+
+// ShellOutputBody is worker→CP: a chunk of PTY output (stdout+stderr merged).
+type ShellOutputBody struct {
+	StreamID string `json:"stream_id"`
+	Data     string `json:"data"`
+}
+
+// ShellExitBody is worker→CP: the shell process exited cleanly.
+type ShellExitBody struct {
+	StreamID string `json:"stream_id"`
+	ExitCode int    `json:"exit_code,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// ShellErrorBody is worker→CP: failed to spawn the shell or PTY died
+// abnormally. Sent in lieu of (not in addition to) ShellExit.
+type ShellErrorBody struct {
+	StreamID string `json:"stream_id"`
+	Message  string `json:"message"`
+}
+
+// LogsOpenBody is CP→worker: stream container logs for deployment_id /
+// container_id. When both are empty the worker tails its first running
+// container. Lines flow back as LogsLine envelopes until the dashboard sends
+// LogsClose (or the container exits, which emits LogsEnd).
+type LogsOpenBody struct {
+	StreamID     string `json:"stream_id"`
+	DeploymentID string `json:"deployment_id,omitempty"`
+	ContainerID  string `json:"container_id,omitempty"`
+}
+
+// LogsLineBody is worker→CP: one line of container output. stream is
+// "stdout" or "stderr".
+type LogsLineBody struct {
+	StreamID string `json:"stream_id"`
+	Stream   string `json:"stream,omitempty"`
+	Data     string `json:"data"`
+}
+
+// LogsEndBody is worker→CP: log stream ended (container stopped or follow
+// timed out).
+type LogsEndBody struct {
+	StreamID string `json:"stream_id"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// LogsCloseBody is CP→worker: stop streaming logs for this session.
+// Idempotent — worker ignores unknown stream_ids.
+type LogsCloseBody struct {
+	StreamID string `json:"stream_id"`
 }

@@ -91,6 +91,10 @@ func (r tritonRecipe) BuildPlan(in BuildInput) (Plan, error) {
 	if err := validate(in); err != nil {
 		return Plan{}, err
 	}
+	// Triton (NVIDIA Inference Server) is GPU-only.
+	if err := requireGPU(in); err != nil {
+		return Plan{}, err
+	}
 	env := mergeEnv(in.Env, nil)
 	return Plan{
 		Image:         r.image,
@@ -119,6 +123,10 @@ type diffusionRecipe struct {
 
 func (r diffusionRecipe) BuildPlan(in BuildInput) (Plan, error) {
 	if err := validate(in); err != nil {
+		return Plan{}, err
+	}
+	// inferia-diffusion runs image/video generation pipelines that require GPU.
+	if err := requireGPU(in); err != nil {
 		return Plan{}, err
 	}
 	env := mergeEnv(in.Env, map[string]string{

@@ -3,9 +3,12 @@ module github.com/inferia/inferia-worker
 go 1.26.3
 
 require (
+	github.com/creack/pty v1.1.18
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/docker/go-connections v0.7.0
 	github.com/gofiber/fiber/v2 v2.52.13
+	github.com/gofiber/websocket/v2 v2.2.1
+	nhooyr.io/websocket v1.8.17
 )
 
 require (
@@ -21,7 +24,6 @@ require (
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/gofiber/websocket/v2 v2.2.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
@@ -48,5 +50,4 @@ require (
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
-	nhooyr.io/websocket v1.8.17 // indirect
 )

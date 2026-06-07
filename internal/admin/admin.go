@@ -5,24 +5,24 @@
 // proxy (INFERENCE_TOKEN bearer). The orchestration HTTP server proxies
 // dashboard WebSocket connections through to these endpoints so operators
 // can see what their model containers are doing without SSH'ing the host.
+//
+// As of the channel-tunnel refactor, the heavy lifting (PTY pump,
+// docker-logs demux) lives in internal/shellbridge so the same primitives
+// also drive the control-channel multiplexer. These HTTP-WS endpoints
+// remain mounted for direct connections and operator-issued WS dials.
 package admin
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"strings"
 	"sync"
-	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
+	"github.com/inferia/inferia-worker/internal/shellbridge"
 )
 
 // Runtime is the subset of runtime.Runtime the admin handlers need.
@@ -61,54 +61,24 @@ func websocketUpgrade(c *fiber.Ctx) error {
 	return fiber.ErrUpgradeRequired
 }
 
-// containerLookup is the narrow surface resolveContainerCore needs to
-// query docker. Real callers use a docker-backed implementation; tests
-// supply a fake. Both methods return "" on miss rather than an error so
-// the core logic can keep the precedence chain in one place.
+// shellbridgeRuntime adapts admin.Runtime to shellbridge.Runtime — same
+// surface, just a different package. Kept as a thin wrapper rather than
+// re-exporting because admin's Runtime is the historical interface and
+// shellbridge's is the new one; we don't want to bind one to the other.
+type shellbridgeRuntime struct{ inner Runtime }
+
+func (s shellbridgeRuntime) ContainerForDeployment(id string) string {
+	return s.inner.ContainerForDeployment(id)
+}
+func (s shellbridgeRuntime) LoadedDeployments() []string { return s.inner.LoadedDeployments() }
+
+// containerLookup retained for backwards compatibility with the existing
+// test suite (admin_test.go exercises resolveContainerCore). The real
+// resolver now lives in shellbridge.ResolveContainer; this surface only
+// satisfies the older tests.
 type containerLookup interface {
 	ByDeploymentID(depID string) string
 	MostRecent() string
-}
-
-// dockerLookup wires containerLookup to the real Docker SDK client.
-type dockerLookup struct{ cli *client.Client }
-
-func (d dockerLookup) ByDeploymentID(depID string) string {
-	if d.cli == nil || depID == "" {
-		return ""
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	list, err := d.cli.ContainerList(ctx, container.ListOptions{
-		All:     false,
-		Filters: filters.NewArgs(filters.KeyValuePair{Key: "name", Value: depID}),
-	})
-	if err != nil || len(list) == 0 {
-		return ""
-	}
-	for _, c := range list {
-		for _, n := range c.Names {
-			if strings.Contains(n, depID) {
-				return c.ID
-			}
-		}
-	}
-	return list[0].ID
-}
-
-func (d dockerLookup) MostRecent() string {
-	if d.cli == nil {
-		return ""
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	list, err := d.cli.ContainerList(ctx, container.ListOptions{
-		Filters: filters.NewArgs(filters.KeyValuePair{Key: "name", Value: "inferia-"}),
-	})
-	if err != nil || len(list) == 0 {
-		return ""
-	}
-	return list[0].ID
 }
 
 // resolveContainerCore picks the container to operate on. Preference:
@@ -120,6 +90,10 @@ func (d dockerLookup) MostRecent() string {
 //  4. the first loaded deployment when the request omits both
 //
 // Returns ("", error string) if nothing can be resolved.
+//
+// Functionally mirrors shellbridge.ResolveContainer; left in place for
+// the existing test fixtures that exercise the precedence chain through
+// a fake containerLookup.
 func resolveContainerCore(getQuery func(string) string, rt Runtime, look containerLookup) (string, string) {
 	if raw := getQuery("container"); raw != "" {
 		return raw, ""
@@ -148,13 +122,6 @@ func resolveContainerCore(getQuery func(string) string, rt Runtime, look contain
 	return "", fmt.Sprintf("deployment %q has no running container", depID)
 }
 
-// resolveContainer is the WS-facing wrapper around resolveContainerCore.
-// Real handlers bind the docker client; tests exercise the core directly.
-func resolveContainer(c *websocket.Conn, rt Runtime, docker *client.Client) (string, string) {
-	getQuery := func(key string) string { return c.Query(key) }
-	return resolveContainerCore(getQuery, rt, dockerLookup{cli: docker})
-}
-
 func sendErr(c *websocket.Conn, detail string) {
 	_ = c.WriteJSON(map[string]string{"type": "error", "message": detail})
 	_ = c.Close()
@@ -163,14 +130,11 @@ func sendErr(c *websocket.Conn, detail string) {
 // --- /v1/logs ---------------------------------------------------------------
 
 func handleLogs(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
-	containerID, errMsg := resolveContainer(c, rt, dockerCli)
-	if errMsg != "" {
-		sendErr(c, errMsg)
-		return
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// One mutex per WS — fasthttp/websocket cannot interleave writes.
+	var wmu sync.Mutex
 
 	// Stop the stream when the client disconnects.
 	go func() {
@@ -182,36 +146,16 @@ func handleLogs(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
 		}
 	}()
 
-	rc, err := dockerCli.ContainerLogs(ctx, containerID, container.LogsOptions{
-		ShowStdout: true,
-		ShowStderr: true,
-		Follow:     true,
-		Tail:       "200",
-		Timestamps: false,
-	})
-	if err != nil {
-		sendErr(c, fmt.Sprintf("docker logs: %v", err))
+	// Build a per-call docker logs backend so we can keep resolveContainer
+	// inline (admin's tests rely on the existing query-string precedence
+	// chain). We bypass DefaultLogsSpawn deliberately so the admin path
+	// stays independent of shellbridge package globals.
+	cid, errMsg := shellbridge.ResolveContainer(dockerCli, shellbridgeRuntime{rt},
+		c.Query("container"), c.Query("deployment"))
+	if errMsg != nil {
+		sendErr(c, errMsg.Error())
 		return
 	}
-	defer rc.Close()
-
-	// docker multiplexes stdout/stderr in a framed protocol; demux into
-	// two pipes and forward each line over the WS as a "log" JSON frame.
-	outR, outW := io.Pipe()
-	errR, errW := io.Pipe()
-	defer outR.Close()
-	defer errR.Close()
-
-	demuxDone := make(chan struct{})
-	go func() {
-		defer close(demuxDone)
-		_, _ = stdcopy.StdCopy(outW, errW, rc)
-		_ = outW.Close()
-		_ = errW.Close()
-	}()
-
-	// One mutex per WS — fasthttp/websocket cannot interleave writes.
-	var wmu sync.Mutex
 	emit := func(stream, line string) {
 		wmu.Lock()
 		defer wmu.Unlock()
@@ -221,101 +165,61 @@ func handleLogs(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
 			"data":   line,
 		})
 	}
-
-	go forwardLines(outR, "stdout", emit)
-	go forwardLines(errR, "stderr", emit)
-
-	<-demuxDone
-	wmu.Lock()
-	_ = c.WriteJSON(map[string]string{"type": "end"})
-	wmu.Unlock()
-}
-
-// forwardLines reads from r line-by-line and emits each via fn. EOF/errors
-// silently end the loop — the caller (handleLogs) wraps everything in one
-// cancellable context so the goroutine winds up cleanly.
-func forwardLines(r io.Reader, stream string, fn func(stream, line string)) {
-	buf := make([]byte, 4096)
-	var partial []byte
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			data := append(partial, buf[:n]...)
-			partial = nil
-			start := 0
-			for i, b := range data {
-				if b == '\n' {
-					line := string(data[start:i])
-					fn(stream, line)
-					start = i + 1
-				}
-			}
-			if start < len(data) {
-				partial = append(partial, data[start:]...)
-			}
-		}
-		if err != nil {
-			if len(partial) > 0 {
-				fn(stream, string(partial))
-			}
-			return
-		}
+	sess, err := shellbridge.StartLogsWithBackend(ctx,
+		shellbridge.LogsSessionConfig{
+			Container: cid,
+			Tail:      200,
+			OnLine:    emit,
+			OnEnd: func(reason string) {
+				wmu.Lock()
+				defer wmu.Unlock()
+				_ = c.WriteJSON(map[string]string{"type": "end", "reason": reason})
+			},
+		},
+		func(cfg shellbridge.LogsSessionConfig) (shellbridge.LogsBackend, error) {
+			return shellbridge.NewDockerLogsBackend(dockerCli, cid, cfg.Tail), nil
+		},
+	)
+	if err != nil {
+		sendErr(c, err.Error())
+		return
 	}
+	defer sess.Close()
+	<-ctx.Done()
 }
 
 // --- /v1/shell --------------------------------------------------------------
 
 func handleShell(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
-	containerID, errMsg := resolveContainer(c, rt, dockerCli)
-	if errMsg != "" {
-		sendErr(c, errMsg)
-		return
-	}
+	rawContainer := c.Query("container")
+	rawDeployment := c.Query("deployment")
+	// hostMode mirrors the channel-tunnel routing: when the caller pinned
+	// neither a container nor a deployment, fall through to a host-shell
+	// session (privileged sidecar + nsenter) rather than trying to
+	// resolve "first running container". The worker container itself is
+	// distroless and would fail any subsequent /bin/sh exec.
+	hostMode := rawContainer == "" && rawDeployment == ""
 
+	var cid string
+	if !hostMode {
+		resolved, errMsg := shellbridge.ResolveContainer(dockerCli, shellbridgeRuntime{rt},
+			rawContainer, rawDeployment)
+		if errMsg != nil {
+			sendErr(c, errMsg.Error())
+			return
+		}
+		cid = resolved
+	}
 	shellPath := c.Query("shell")
 	if shellPath == "" {
 		// Try /bin/bash first (most images), fall back to /bin/sh
 		// at-runtime if exec fails on bash.
 		shellPath = "/bin/bash"
 	}
-	// `user` is forwarded to docker exec --user verbatim. Accepts "name",
-	// "uid", "name:group", or "uid:gid". Empty means "use container default".
 	execUser := c.Query("user")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	execCfg := container.ExecOptions{
-		AttachStdin:  true,
-		AttachStdout: true,
-		AttachStderr: true,
-		Tty:          true,
-		Cmd:          []string{shellPath},
-		User:         execUser,
-	}
-	created, err := dockerCli.ContainerExecCreate(ctx, containerID, execCfg)
-	if err != nil {
-		// Fallback shell: caller asked for something the image doesn't
-		// ship (e.g. /bin/bash on a distroless container). Retry once with
-		// /bin/sh so the user gets *some* shell rather than a hard error.
-		if shellPath != "/bin/sh" {
-			execCfg.Cmd = []string{"/bin/sh"}
-			created, err = dockerCli.ContainerExecCreate(ctx, containerID, execCfg)
-		}
-		if err != nil {
-			sendErr(c, fmt.Sprintf("exec create: %v", err))
-			return
-		}
-	}
-
-	hijack, err := dockerCli.ContainerExecAttach(ctx, created.ID, container.ExecStartOptions{
-		Tty: true,
-	})
-	if err != nil {
-		sendErr(c, fmt.Sprintf("exec attach: %v", err))
-		return
-	}
-	defer hijack.Close()
 
 	var wmu sync.Mutex
 	emit := func(payload map[string]any) error {
@@ -324,27 +228,42 @@ func handleShell(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
 		return c.WriteJSON(payload)
 	}
 
-	// Container → WS pump.
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, rerr := hijack.Reader.Read(buf)
-			if n > 0 {
-				if werr := emit(map[string]any{
-					"type": "output",
-					"data": string(buf[:n]),
-				}); werr != nil {
-					cancel()
-					return
-				}
-			}
-			if rerr != nil {
-				_ = emit(map[string]any{"type": "exit", "reason": rerr.Error()})
-				cancel()
-				return
-			}
+	// Per-call factory so the admin path stays independent of shellbridge
+	// package globals (and so the existing tests don't have to mutate
+	// DefaultSpawn / DefaultHostSpawn). Same docker client either way —
+	// the host backend wraps a sidecar around the same daemon connection.
+	backendFactory := func(cfg shellbridge.ShellSessionConfig) (shellbridge.ShellBackend, error) {
+		if hostMode {
+			return shellbridge.NewHostShellBackend(dockerCli), nil
 		}
-	}()
+		return shellbridge.NewDockerShellBackend(dockerCli, cid), nil
+	}
+
+	sess, err := shellbridge.StartShellWithBackend(ctx,
+		shellbridge.ShellSessionConfig{
+			Shell:      shellPath,
+			User:       execUser,
+			Container:  cid,
+			Deployment: "", // already resolved into Container (docker mode) or empty (host mode)
+			OnOutput: func(data []byte) {
+				_ = emit(map[string]any{"type": "output", "data": string(data)})
+			},
+			OnExit: func(code int, reason string) {
+				_ = emit(map[string]any{"type": "exit", "code": code, "reason": reason})
+				cancel()
+			},
+			OnError: func(message string) {
+				_ = emit(map[string]any{"type": "exit", "reason": message})
+				cancel()
+			},
+		},
+		backendFactory,
+	)
+	if err != nil {
+		sendErr(c, err.Error())
+		return
+	}
+	defer sess.Close()
 
 	// WS → container pump.
 	for {
@@ -362,31 +281,25 @@ func handleShell(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
 			case "stdin":
 				data, _ := env["data"].(string)
 				if data != "" {
-					_, _ = hijack.Conn.Write([]byte(data))
+					_ = sess.WriteInput([]byte(data))
 				}
 				continue
 			case "resize":
 				rows, _ := toInt(env["rows"])
 				cols, _ := toInt(env["cols"])
 				if rows > 0 && cols > 0 {
-					_ = dockerCli.ContainerExecResize(ctx, created.ID, container.ResizeOptions{
-						Height: uint(rows),
-						Width:  uint(cols),
-					})
+					_ = sess.Resize(uint16(cols), uint16(rows))
 				}
 				continue
 			}
 		}
-		_, _ = hijack.Conn.Write(msg)
+		_ = sess.WriteInput(msg)
 	}
-
-	// Best-effort: wait for exec to finish so we can report exit code.
-	deadline, cdone := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cdone()
-	if insp, ierr := dockerCli.ContainerExecInspect(deadline, created.ID); ierr == nil {
-		_ = emit(map[string]any{"type": "exit", "code": insp.ExitCode})
+	target := cid
+	if hostMode {
+		target = "host"
 	}
-	log.Printf("shell session for %s ended", containerID)
+	log.Printf("shell session for %s ended", target)
 }
 
 func toInt(v any) (int, bool) {

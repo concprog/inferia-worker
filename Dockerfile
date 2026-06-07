@@ -13,7 +13,9 @@ RUN go mod download
 COPY . .
 
 # Build a static binary.
-ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ENV CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH}
 RUN go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
 
 # ----- runtime -----

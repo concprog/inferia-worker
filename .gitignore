@@ -1,8 +1,8 @@
 # Binaries
 /bin/
 /dist/
-worker
-worker.exe
+/worker
+/worker.exe
 
 # Coverage
 coverage.out

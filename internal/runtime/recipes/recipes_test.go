@@ -379,6 +379,122 @@ func TestBuildPlan_EnvVarsHonoured(t *testing.T) {
 	}
 }
 
+// CPU-tier instances ship without GPUs. Engines that can run inference on
+// CPU (ollama, infinity) must build a valid Plan with GPUIndices == nil;
+// GPU-only engines (vllm, triton, diffusion) must still reject.
+//
+// The plan task originally specified these against a hypothetical
+// `Prepare(plan)` API; the actual repo uses per-recipe `BuildPlan(in)`,
+// so the test bodies are adapted to the existing surface but the names
+// and intent map 1:1 to plan task 28.
+
+func TestPrepareAllowsZeroGPUsForCpuFriendlyEngines(t *testing.T) {
+	// ollama is in the CPU-friendly set: must NOT reject zero GPUIndices.
+	r, err := Get("ollama")
+	if err != nil {
+		t.Fatalf("Get(ollama): %v", err)
+	}
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d-1",
+		ArtifactURI:  "hf://smollm2:135m",
+		GPUIndices:   []int{},
+		HostPort:     19000,
+	})
+	if err != nil {
+		t.Fatalf("ollama with zero GPU should be allowed; got error: %v", err)
+	}
+	if plan.Image == "" {
+		t.Errorf("expected non-empty image for ollama CPU plan")
+	}
+	if len(plan.GPUIndices) != 0 {
+		t.Errorf("expected empty GPUIndices in plan, got %v", plan.GPUIndices)
+	}
+}
+
+func TestPrepareRejectsZeroGPUsForGpuOnlyEngines(t *testing.T) {
+	// vllm is GPU-only: must still reject zero GPUIndices.
+	r, err := Get("vllm")
+	if err != nil {
+		t.Fatalf("Get(vllm): %v", err)
+	}
+	if _, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d-1",
+		ArtifactURI:  "hf://Qwen/Qwen3-0.6B",
+		GPUIndices:   []int{},
+		HostPort:     19000,
+	}); err == nil {
+		t.Fatal("vllm with zero GPU should be rejected")
+	}
+	// triton and inferia-diffusion are also GPU-only; check them too so a
+	// future refactor that drops requireGPU from any of them is caught here.
+	for _, name := range []string{"triton", "inferia-diffusion", "vllm-omni"} {
+		r, err := Get(name)
+		if err != nil {
+			t.Fatalf("Get(%q): %v", name, err)
+		}
+		if _, err := r.BuildPlan(BuildInput{
+			DeploymentID: "d-1",
+			ArtifactURI:  "hf://org/model",
+			GPUIndices:   []int{},
+			HostPort:     19000,
+		}); err == nil {
+			t.Errorf("%s with zero GPU should be rejected", name)
+		}
+	}
+}
+
+func TestPrepareAllowsZeroGPUsForInfinity(t *testing.T) {
+	r, err := Get("infinity")
+	if err != nil {
+		t.Fatalf("Get(infinity): %v", err)
+	}
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d-1",
+		ArtifactURI:  "hf://BAAI/bge-small-en-v1.5",
+		GPUIndices:   []int{},
+		HostPort:     19000,
+	})
+	if err != nil {
+		t.Fatalf("infinity with zero GPU should be allowed; got error: %v", err)
+	}
+	// Even on CPU, the model id must propagate to the command.
+	if !strings.Contains(strings.Join(plan.Cmd, " "), "BAAI/bge-small-en-v1.5") {
+		t.Errorf("model id missing from infinity CPU plan cmd: %v", plan.Cmd)
+	}
+}
+
+// Nil-slice (as distinct from empty-slice) must also be accepted for
+// CPU-friendly engines and rejected for GPU-only engines, because Go
+// treats `nil` and `[]int{}` differently in JSON/proto deserialisation
+// and we don't want a regression there.
+func TestPrepareCpuFriendly_NilGPUIndicesAlsoAllowed(t *testing.T) {
+	for _, name := range []string{"ollama", "infinity"} {
+		r, _ := Get(name)
+		if _, err := r.BuildPlan(BuildInput{
+			DeploymentID: "d-nil",
+			ArtifactURI:  "hf://org/m",
+			GPUIndices:   nil,
+			HostPort:     19000,
+		}); err != nil {
+			t.Errorf("%s with nil GPUIndices should be allowed: %v", name, err)
+		}
+	}
+}
+
+// Negative GPU indices must still reject even on CPU-friendly engines —
+// a negative entry is always an input bug, never an intentional CPU run.
+func TestPrepareCpuFriendly_StillRejectsNegativeIndex(t *testing.T) {
+	r, _ := Get("ollama")
+	if _, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d",
+		ArtifactURI:  "hf://m",
+		GPUIndices:   []int{-1},
+		HostPort:     19000,
+	}); err == nil {
+		t.Errorf("ollama with negative GPU index must still reject")
+	}
+}
+
 func TestBuildPlan_HostPortRange(t *testing.T) {
 	r, _ := Get("vllm")
 	for _, p := range []int{0, -1, 65536, 99999} {

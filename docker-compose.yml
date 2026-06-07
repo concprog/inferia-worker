@@ -12,7 +12,7 @@
 
 services:
   worker:
-    image: ${INFERIA_WORKER_IMAGE:-ghcr.io/inferia/inferia-worker:latest}
+    image: ${INFERIA_WORKER_IMAGE:-ghcr.io/inferiaai/inferia-worker:latest}
     container_name: inferia-worker
     restart: unless-stopped
 
@@ -30,6 +30,16 @@ services:
       READINESS_TIMEOUT_SECONDS: ${READINESS_TIMEOUT_SECONDS:-180}
       HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-5}
       MODELS_NETWORK:           ${MODELS_NETWORK:-inferia-models}
+      # Escape hatches for hosts where automatic GPU detection misfires.
+      # The worker first tries `nvidia-smi`, then falls back to counting
+      # /dev/nvidia[0-9]+ files mounted by the NVIDIA container runtime.
+      # Set ALLOCATABLE_GPU_OVERRIDE to force the advertised GPU count
+      # (useful when only a subset of the host's GPUs is passed through),
+      # and ALLOCATABLE_GPU_MODELS_OVERRIDE to a pipe-joined model list
+      # (e.g. "NVIDIA A100|NVIDIA A100") when the fallback can't recover
+      # the real model name. Unset by default → use detection.
+      ALLOCATABLE_GPU_OVERRIDE:        ${ALLOCATABLE_GPU_OVERRIDE:-}
+      ALLOCATABLE_GPU_MODELS_OVERRIDE: ${ALLOCATABLE_GPU_MODELS_OVERRIDE:-}
 
     # Required volumes:
     #   - /var/run/docker.sock : the worker launches sibling containers on the host.
@@ -48,18 +58,22 @@ services:
     # control plane already knows liveness from heartbeats). Operators who
     # want a local-host probe can add their own using a sibling container.
 
-    # GPU access for the worker itself is NOT required — it never runs CUDA
-    # code, only launches sibling containers that get --gpus passed through
-    # via the Docker SDK. Operators who want the worker to also see GPUs for
-    # telemetry should uncomment the deploy block below.
+    # GPU access for the worker itself. The worker never runs CUDA, but the
+    # /dev/nvidia[0-9]+ devices the NVIDIA container runtime mounts here are
+    # how the worker's telemetry counts GPUs in the distroless image (which
+    # ships without nvidia-smi). Without this block the worker advertises
+    # gpu=0 and the control plane's placement filter rejects every GPU
+    # deployment with a confusing "Worker pools self-provision" error.
     #
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+    # Operators who do NOT want this host to serve GPU workloads can
+    # comment this out and the worker stays CPU-only.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
     # Attach to the InferiaLLM control-plane network when present so the
     # worker can resolve the control plane's container hostname (e.g.

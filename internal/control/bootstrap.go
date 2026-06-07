@@ -7,7 +7,36 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/inferia/inferia-worker/internal/cloudenv"
 )
+
+// BuildRegisterInput holds all the caller-supplied values for a register POST.
+type BuildRegisterInput struct {
+	NodeName       string
+	PoolID         string
+	Allocatable    map[string]string
+	AdvertiseURL   string
+	Runtime        cloudenv.RuntimeInfo
+	BootstrapToken string
+}
+
+// BuildRegisterRequest constructs a RegisterRequest from the given input,
+// propagating cloud-env fields from the runtime info. Fields that have a zero
+// value are omitted from the JSON payload via omitempty.
+func BuildRegisterRequest(in BuildRegisterInput) RegisterRequest {
+	return RegisterRequest{
+		NodeName:         in.NodeName,
+		PoolID:           in.PoolID,
+		Allocatable:      in.Allocatable,
+		AdvertiseURL:     in.AdvertiseURL,
+		RuntimeEnv:       string(in.Runtime.Kind),
+		InstanceID:       in.Runtime.InstanceID,
+		Region:           in.Runtime.Region,
+		AvailabilityZone: in.Runtime.AvailabilityZone,
+		BootstrapToken:   in.BootstrapToken,
+	}
+}
 
 // Bootstrapper performs the one-shot HTTP exchange to swap a bootstrap token
 // for a long-lived worker JWT.

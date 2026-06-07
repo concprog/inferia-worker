@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -293,4 +294,51 @@ func wsURL(httpURL string) string {
 		return "wss://" + httpURL[8:]
 	}
 	return httpURL
+}
+
+func TestHello_IncludesCloudEnv(t *testing.T) {
+	// Confirms HelloBody carries the four cloud-env fields when constructed
+	// with runtime values. Marshal to JSON and assert all fields appear.
+	body := HelloBody{
+		RuntimeEnv:       "aws-ec2",
+		InstanceID:       "i-hello",
+		Region:           "us-east-1",
+		AvailabilityZone: "us-east-1c",
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	for _, want := range []string{
+		`"runtime_env":"aws-ec2"`,
+		`"instance_id":"i-hello"`,
+		`"region":"us-east-1"`,
+		`"availability_zone":"us-east-1c"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("HelloBody missing %q: %s", want, s)
+		}
+	}
+}
+
+func TestHello_OmitsCloudEnvWhenLocal(t *testing.T) {
+	// A zero HelloBody (worker running locally with no cloud-env fields set)
+	// must not emit runtime_env, instance_id, region, availability_zone, or
+	// server_time. server_time uses *time.Time so nil is omitempty-friendly.
+	body := HelloBody{}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	for _, unwanted := range []string{`"runtime_env"`, `"instance_id"`, `"region"`, `"availability_zone"`} {
+		if strings.Contains(s, unwanted) {
+			t.Errorf("expected %s omitted, got %s", unwanted, s)
+		}
+	}
+	// server_time must also be omitted — nil *time.Time satisfies omitempty.
+	if strings.Contains(s, `"server_time"`) {
+		t.Errorf("server_time should be omitted on zero HelloBody, got %s", s)
+	}
 }

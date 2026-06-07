@@ -110,15 +110,17 @@ func Names() []string {
 }
 
 // validate runs shared input checks. Recipes call this first.
+//
+// Note: GPU index presence is NOT checked here. CPU-friendly engines
+// (ollama, infinity) can run inference without a GPU, so they pass
+// GPUIndices == nil. GPU-only engines (vllm, triton, diffusion) must
+// additionally call requireGPU(in) to enforce ≥1 index.
 func validate(in BuildInput) error {
 	if in.DeploymentID == "" {
 		return fmt.Errorf("DeploymentID is required")
 	}
 	if err := validateArtifactURI(in.ArtifactURI); err != nil {
 		return err
-	}
-	if len(in.GPUIndices) == 0 {
-		return fmt.Errorf("at least one GPU index is required")
 	}
 	for _, i := range in.GPUIndices {
 		if i < 0 {
@@ -135,6 +137,17 @@ func validate(in BuildInput) error {
 		if len(k) > maxConfigKey {
 			return fmt.Errorf("config key length %d exceeds max %d", len(k), maxConfigKey)
 		}
+	}
+	return nil
+}
+
+// requireGPU enforces that at least one GPU index is present. GPU-only
+// recipes (vllm, triton, diffusion) call this after validate(); CPU-friendly
+// recipes (ollama, infinity) do not, so a deploy onto a CPU-only worker
+// host succeeds for those engines.
+func requireGPU(in BuildInput) error {
+	if len(in.GPUIndices) == 0 {
+		return fmt.Errorf("at least one GPU index is required")
 	}
 	return nil
 }

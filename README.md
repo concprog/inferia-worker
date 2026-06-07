@@ -32,6 +32,19 @@ make lint           # gofmt + go vet
 
 All configuration is via environment variables. See `.env.sample` for the full list with defaults.
 
+## Docker image
+
+The worker is published to GHCR on every `v*` tag:
+
+```
+docker pull ghcr.io/<org>/inferia-worker:latest
+docker pull ghcr.io/<org>/inferia-worker:v1.2.3
+```
+
+`<org>` is the repository owner. Images are multi-arch (linux/amd64, linux/arm64).
+On a fresh EC2 instance, cloud-init handles `docker run` automatically when the
+node is provisioned via InferiaLLM's AWS adapter.
+
 ## License
 
 Apache-2.0
