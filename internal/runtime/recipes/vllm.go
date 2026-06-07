@@ -28,7 +28,6 @@ func (r vllmRecipe) BuildPlan(in BuildInput) (Plan, error) {
 	// ----- GPU-aware default flags -----
 	envDefaults := map[string]string{
 		"CUDA_MODULE_LOADING": "LAZY",
-		"LD_LIBRARY_PATH":     "/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/usr/local/cuda/lib64",
 	}
 	gpuCfg, gpuEnv := vllm.GPUOptimalConfig(in.GPUName, in.GPUMemoryMiB, len(in.GPUIndices))
 	for k, v := range gpuCfg {
@@ -39,6 +38,25 @@ func (r vllmRecipe) BuildPlan(in BuildInput) (Plan, error) {
 	for k, v := range gpuEnv {
 		envDefaults[k] = v
 	}
+	// LD_LIBRARY_PATH is set after gpuEnv so GPU profiles cannot accidentally
+	// override it. This path fixes an AWS DLAMI driver mismatch (see below)
+	// that would otherwise leave deploys stuck in DEPLOYING.
+	//
+	// The vllm-openai image bakes a CUDA forward-compat driver (e.g.
+	// /usr/local/cuda/compat/libcuda.so.575) ahead of the standard lib dirs
+	// in its ld.so cache. CUDA forward-compat is meant to let a newer CUDA
+	// userspace run on an OLDER kernel driver. On hosts whose NVIDIA driver
+	// is NEWER than that compat lib (e.g. AWS DLAMI driver 580), the loader
+	// still binds the compat libcuda — now mismatched against the running
+	// kernel module — and CUDA init dies with "Error 803: system has
+	// unsupported display driver / cuda driver combination" before a single
+	// weight is fetched, leaving the deploy stuck DEPLOYING. Putting the
+	// multiarch dir (where the nvidia-container-toolkit injects the HOST
+	// driver's libcuda, which always matches the running kernel module)
+	// FIRST on LD_LIBRARY_PATH makes the container bind the correct driver
+	// and bypass the broken compat shim. The remaining dirs preserve the
+	// image's own search path for the rest of the CUDA toolkit.
+	envDefaults["LD_LIBRARY_PATH"] = "/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
 
 	cmd := []string{
 		model,
