@@ -82,7 +82,7 @@ var allowedURISchemes = map[string]struct{}{
 var uriPattern = regexp.MustCompile(`^[a-z][a-z0-9+\-.]*://[^\x00-\x1f` + "`" + `$;|&><(\)\n\r]+$`)
 
 var registry = map[string]Recipe{
-	"vllm":              vllmRecipe{image: "docker.io/vllm/vllm-openai:v0.16.0", port: 8000, readyPath: "/health"},
+	"vllm":              vllmRecipe{image: "docker.io/vllm/vllm-openai:v0.22.1", port: 8000, readyPath: "/health"},
 	"vllm-omni":         vllmRecipe{image: "docker.io/vllm/vllm-omni:v0.11.0rc1", port: 8000, readyPath: "/health"},
 	"ollama":            ollamaRecipe{image: "docker.io/ollama/ollama:latest", port: 11434, readyPath: "/"},
 	"infinity":          infinityRecipe{image: "michaelf34/infinity:latest", port: 7997, readyPath: "/health"},

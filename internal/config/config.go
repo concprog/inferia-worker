@@ -41,7 +41,12 @@ const (
 	defaultDockerHost   = "unix:///var/run/docker.sock"
 	defaultModelsNet    = "inferia-models"
 	defaultLogLevel     = "info"
-	defaultPullTimeout  = 600
+	// Large inference images (e.g. vllm/vllm-openai:v0.22.x is ~35 GB
+	// uncompressed) take well over 10 min to download AND extract on a gp3 root
+	// volume, so the previous 600 s budget aborted the pull with "context
+	// deadline exceeded" and failed the deploy before the image was ready.
+	// Override per-node via PULL_TIMEOUT_SECONDS.
+	defaultPullTimeout  = 1800
 	defaultReadyTimeout = 180
 	defaultHeartbeat    = 5
 )

@@ -64,7 +64,9 @@ func New(cfg Config) *Runtime {
 		cfg.ReadinessTimeout = 180 * time.Second
 	}
 	if cfg.PullTimeout == 0 {
-		cfg.PullTimeout = 600 * time.Second
+		// Matches config.defaultPullTimeout: large vLLM images (~35 GB
+		// uncompressed) need well over 10 min to pull+extract on gp3.
+		cfg.PullTimeout = 1800 * time.Second
 	}
 	if cfg.HostPortAllocator == nil {
 		alloc := NewPortAllocator(19000, 19999)

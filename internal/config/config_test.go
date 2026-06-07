@@ -49,7 +49,9 @@ func TestLoadFrom_HappyPath(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Errorf("default LogLevel: %q", cfg.LogLevel)
 	}
-	if cfg.PullTimeoutSeconds != 600 {
+	// Default raised to 1800s so large vLLM images (~35 GiB uncompressed) finish
+	// pulling+extracting on gp3 before the deadline.
+	if cfg.PullTimeoutSeconds != 1800 {
 		t.Errorf("default PullTimeoutSeconds: %d", cfg.PullTimeoutSeconds)
 	}
 	if cfg.ReadinessTimeoutSeconds != 180 {
