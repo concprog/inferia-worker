@@ -243,17 +243,20 @@ func main() {
 // runtimeAdapter narrows *runtime.Runtime to the dispatcher.Runtime interface.
 type runtimeAdapter struct{ r *runtime.Runtime }
 
-func (a *runtimeAdapter) LoadModel(ctx context.Context, id string, plan recipes.Plan) (*dispatcher.LoadResult, error) {
+func (a *runtimeAdapter) LoadModel(ctx context.Context, id string, plan recipes.Plan) (*runtime.LoadResult, error) {
 	res, err := a.r.LoadModel(ctx, id, plan)
 	if err != nil {
 		return nil, err
 	}
-	return &dispatcher.LoadResult{EndpointURL: res.EndpointURL}, nil
+	return &runtime.LoadResult{EndpointURL: res.EndpointURL}, nil
 }
 func (a *runtimeAdapter) UnloadModel(ctx context.Context, id string) error {
 	return a.r.UnloadModel(ctx, id)
 }
 func (a *runtimeAdapter) LoadedDeployments() []string { return a.r.LoadedDeployments() }
+func (a *runtimeAdapter) DeploymentInfo(deploymentID string) (recipe, model, phase string, pullDur, startDur time.Duration, ok bool) {
+	return a.r.DeploymentInfo(deploymentID)
+}
 
 // hostTelemetry reads CPU/memory/GPU from the host.
 type hostTelemetry struct{}

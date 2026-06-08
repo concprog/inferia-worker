@@ -77,10 +77,13 @@ func (c *Collector) RemoveDeployment(id string) {
 	delete(c.deployments, id)
 }
 
-func (c *Collector) Snapshot(runtimeInfo map[string]struct {
-	recipe, model, phase string
-	pullDur, startDur    time.Duration
-}) []control.DeploymentMetric {
+// RuntimeInfo is a map payload helper to pass states from runtime to the metrics collector.
+type RuntimeInfo struct {
+	Recipe, Model, Phase string
+	PullDur, StartDur    time.Duration
+}
+
+func (c *Collector) Snapshot(runtimeInfo map[string]RuntimeInfo) []control.DeploymentMetric {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -93,11 +96,11 @@ func (c *Collector) Snapshot(runtimeInfo map[string]struct {
 		var pullDur, startDur int64
 
 		if ok {
-			recipe = info.recipe
-			model = info.model
-			phase = info.phase
-			pullDur = info.pullDur.Milliseconds()
-			startDur = info.startDur.Milliseconds()
+			recipe = info.Recipe
+			model = info.Model
+			phase = info.Phase
+			pullDur = info.PullDur.Milliseconds()
+			startDur = info.StartDur.Milliseconds()
 		}
 
 		results = append(results, control.DeploymentMetric{

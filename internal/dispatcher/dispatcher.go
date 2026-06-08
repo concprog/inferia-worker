@@ -14,17 +14,26 @@ import (
 	"github.com/inferia/inferia-worker/internal/runtime/recipes"
 )
 
+// Runtime defines the subset of *runtime.Runtime operations needed by the
+// dispatcher. Avoids packages importing each other recursively.
+type Runtime interface {
+	LoadModel(ctx context.Context, id string, plan recipes.Plan) (*runtime.LoadResult, error)
+	UnloadModel(ctx context.Context, id string) error
+	LoadedDeployments() []string
+	DeploymentInfo(deploymentID string) (recipe, model, phase string, pullDur, startDur time.Duration, ok bool)
+}
+
 // Dispatcher implements control.Dispatcher. It is the primary adapter between
 // the control plane (WS channel) and the worker's local runtime.
 type Dispatcher struct {
-	Rt        runtime.Runtime
+	Rt        Runtime
 	Telemetry TelemetryReader
 	Metrics   *metrics.Collector
 	GPUName   string
 	GPUMemMiB uint64
 }
 
-func NewDispatcher(rt runtime.Runtime, tel TelemetryReader, mc *metrics.Collector, gpuName string, gpuMem uint64) *Dispatcher {
+func NewDispatcher(rt Runtime, tel TelemetryReader, mc *metrics.Collector, gpuName string, gpuMem uint64) *Dispatcher {
 	return &Dispatcher{
 		Rt:        rt,
 		Telemetry: tel,
@@ -93,7 +102,12 @@ func (d *Dispatcher) UnloadModel(ctx context.Context, body control.UnloadModelBo
 }
 
 func (d *Dispatcher) HeartbeatSnapshot() control.HeartbeatBody {
-	used := d.Telemetry.Read()
+	var used map[string]string
+	if d.Telemetry != nil {
+		used = d.Telemetry.Read()
+	} else {
+		used = map[string]string{}
+	}
 	models := d.Rt.LoadedDeployments()
 
 	body := control.HeartbeatBody{
@@ -103,17 +117,17 @@ func (d *Dispatcher) HeartbeatSnapshot() control.HeartbeatBody {
 
 	if d.Metrics != nil {
 		// Gather runtime info for all loaded deployments to enrich metrics
-		infoMap := make(map[string]struct {
-			recipe, model, phase string
-			pullDur, startDur    time.Duration
-		})
+		infoMap := make(map[string]metrics.RuntimeInfo)
 		for _, id := range models {
 			r, m, p, pd, sd, ok := d.Rt.DeploymentInfo(id)
 			if ok {
-				infoMap[id] = struct {
-					recipe, model, phase string
-					pullDur, startDur    time.Duration
-				}{r, m, p, pd, sd}
+				infoMap[id] = metrics.RuntimeInfo{
+					Recipe:   r,
+					Model:    m,
+					Phase:    p,
+					PullDur:  pd,
+					StartDur: sd,
+				}
 			}
 		}
 		body.DeployMetrics = d.Metrics.Snapshot(infoMap)

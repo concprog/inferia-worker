@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/inferia/inferia-worker/internal/control"
+	"github.com/inferia/inferia-worker/internal/runtime"
 	"github.com/inferia/inferia-worker/internal/runtime/recipes"
 )
 
@@ -19,13 +21,13 @@ type fakeRT struct {
 
 func newFakeRT() *fakeRT { return &fakeRT{loaded: map[string]string{}} }
 
-func (f *fakeRT) LoadModel(ctx context.Context, id string, plan recipes.Plan) (*LoadResult, error) {
+func (f *fakeRT) LoadModel(ctx context.Context, id string, plan recipes.Plan) (*runtime.LoadResult, error) {
 	f.loadCalls = append(f.loadCalls, plan)
 	if f.loadErr != nil {
 		return nil, f.loadErr
 	}
 	f.loaded[id] = "http://endpoint/" + id
-	return &LoadResult{EndpointURL: f.loaded[id]}, nil
+	return &runtime.LoadResult{EndpointURL: f.loaded[id]}, nil
 }
 
 func (f *fakeRT) UnloadModel(ctx context.Context, id string) error {
@@ -43,6 +45,10 @@ func (f *fakeRT) LoadedDeployments() []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+func (f *fakeRT) DeploymentInfo(deploymentID string) (recipe, model, phase string, pullDur, startDur time.Duration, ok bool) {
+	return "vllm", "llama3.1", "running", 0, 0, true
 }
 
 type fakeTelemetry struct{ data map[string]string }
