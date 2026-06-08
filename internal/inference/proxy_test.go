@@ -20,6 +20,10 @@ type fakeRuntime struct {
 
 func (f *fakeRuntime) EndpointURL(deploymentID string) string { return f.endpoints[deploymentID] }
 
+func (f *fakeRuntime) DeploymentInfo(deploymentID string) (recipe, model, phase string, pullDur, startDur time.Duration, ok bool) {
+	return "fake-recipe", "fake-model", "running", 0, 0, true
+}
+
 func startUpstream(handler http.HandlerFunc) *httptest.Server {
 	return httptest.NewServer(handler)
 }

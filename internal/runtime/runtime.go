@@ -97,7 +97,7 @@ func (r *Runtime) DeploymentInfo(deploymentID string) (recipe, model, phase stri
 	}
 
 	recipe = d.plan.Image // Simplification: Use image as recipe name or extend recipes.Plan
-	model := ""
+	model = ""
 	if d.plan.Env != nil {
 		model = d.plan.Env["INFERIA_OLLAMA_MODEL"]
 	}
