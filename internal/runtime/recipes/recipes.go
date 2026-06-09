@@ -38,6 +38,8 @@ type BuildInput struct {
 	GPUIndices   []int
 	HostPort     int
 	Env          map[string]string
+	GPUName      string // populated by dispatcher from telemetry.ReadGPU()
+	GPUMemoryMiB uint64 // populated by dispatcher from telemetry.ReadGPU()
 }
 
 // Recipe builds a Plan for a particular engine/runtime.
@@ -180,7 +182,7 @@ func stripScheme(uri string) string {
 // (string, int, int64, float64, bool). Everything else is dropped.
 func sanitiseConfig(in map[string]any) map[string]any {
 	if len(in) == 0 {
-		return nil
+		return map[string]any{}
 	}
 	out := map[string]any{}
 	for k, v := range in {

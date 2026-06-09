@@ -81,6 +81,9 @@ func main() {
 	log.Printf("cloudenv: kind=%s instance=%s region=%s az=%s",
 		runtimeInfo.Kind, runtimeInfo.InstanceID, runtimeInfo.Region, runtimeInfo.AvailabilityZone)
 
+	gpus, _ := telemetry.ReadGPU()
+	mem, _ := telemetry.ReadMemory()
+
 	// Bootstrap if no token persisted.
 	if tokens.Get() == "" {
 		log.Printf("registering with control plane at %s", cfg.ControlPlaneURL)
@@ -88,8 +91,6 @@ func main() {
 			ControlPlaneURL: cfg.ControlPlaneURL,
 			BootstrapToken:  cfg.BootstrapToken,
 		}
-		gpus, _ := telemetry.ReadGPU()
-		mem, _ := telemetry.ReadMemory()
 		cpu, _ := telemetry.ReadCPU()
 		gpuModels := []string{}
 		for _, g := range gpus {
@@ -173,9 +174,17 @@ func main() {
 	healthz.Register(app, ready)
 
 	// Control channel dispatcher.
+	gpuName := ""
+	var gpuMemMiB uint64
+	if len(gpus) > 0 {
+		gpuName = gpus[0].Name
+		gpuMemMiB = gpus[0].MemoryTotalMiB
+	}
 	disp := &dispatcher.Dispatcher{
 		Rt:        &runtimeAdapter{r: rt},
 		Telemetry: hostTelemetry{},
+		GPUName:   gpuName,
+		GPUMemMiB: gpuMemMiB,
 	}
 
 	ch := &control.Channel{
