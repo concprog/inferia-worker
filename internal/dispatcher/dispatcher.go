@@ -21,6 +21,7 @@ type Runtime interface {
 	UnloadModel(ctx context.Context, id string) error
 	LoadedDeployments() []string
 	DeploymentInfo(deploymentID string) (recipe, model, phase string, pullDur, startDur time.Duration, ok bool)
+	EndpointURL(deploymentID string) string
 }
 
 // Dispatcher implements control.Dispatcher. It is the primary adapter between

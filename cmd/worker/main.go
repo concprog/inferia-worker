@@ -260,6 +260,7 @@ func (a *runtimeAdapter) LoadedDeployments() []string { return a.r.LoadedDeploym
 func (a *runtimeAdapter) DeploymentInfo(deploymentID string) (recipe, model, phase string, pullDur, startDur time.Duration, ok bool) {
 	return a.r.DeploymentInfo(deploymentID)
 }
+func (a *runtimeAdapter) EndpointURL(deploymentID string) string { return a.r.EndpointURL(deploymentID) }
 
 // hostTelemetry reads CPU/memory/GPU from the host.
 type hostTelemetry struct{}

@@ -51,6 +51,8 @@ func (f *fakeRT) DeploymentInfo(deploymentID string) (recipe, model, phase strin
 	return "vllm", "llama3.1", "running", 0, 0, true
 }
 
+func (f *fakeRT) EndpointURL(deploymentID string) string { return f.loaded[deploymentID] }
+
 type fakeTelemetry struct{ data map[string]string }
 
 func (f *fakeTelemetry) Read() map[string]string { return f.data }
