@@ -429,24 +429,25 @@ vllm:avg_generation_throughput_toks_per_sec 58.3`
 	}
 
 	// ================================================================
-	// 8. SECOND-HEARTBEAT — verify sliding window reset
+	// 8. SECOND-HEARTBEAT — verify cumulative counter + sliding histogram
 	// ================================================================
 	t.Log("")
-	t.Log("=== SECOND HEARTBEAT: Verify counter reset (sliding window) ===")
+	t.Log("=== SECOND HEARTBEAT: RequestsTotal is cumulative, histogram resets ===")
 
-	// After the first Snapshot(), RequestsTotal was swapped to 0.
-	// The second heartbeat should reflect 0 new requests since no new
-	// RecordRequest calls were made.
+	// RequestsTotal is now Load() (cumulative), so it stays at 5.
+	// The histogram is Reset() after each snapshot, so P50/P95 become 0.
 	for _, dm := range hb2.DeployMetrics {
 		if dm.DeploymentID == "dep-ollama" {
-			if dm.RequestsTotal != 0 {
-				t.Errorf("dep-ollama requests_total after reset: want 0, got %d", dm.RequestsTotal)
+			if dm.RequestsTotal != 5 {
+				t.Errorf("dep-ollama requests_total (cumulative): want 5, got %d", dm.RequestsTotal)
 			} else {
-				t.Log("  ✓ dep-ollama requests_total correctly reset to 0 (sliding window)")
+				t.Log("  ✓ dep-ollama requests_total stays 5 (cumulative, not windowed)")
 			}
 			if dm.RequestLatencyP50Ms != 0 || dm.RequestLatencyP95Ms != 0 {
-				t.Logf("  note: dep-ollama histogram snapshot = p50=%d p95=%d (Reset clears), may be 0 if histogram was also reset",
+				t.Errorf("dep-ollama latency should be 0 after histogram reset, got p50=%d p95=%d",
 					dm.RequestLatencyP50Ms, dm.RequestLatencyP95Ms)
+			} else {
+				t.Log("  ✓ dep-ollama latencies reset to 0 (sliding histogram)")
 			}
 		}
 	}

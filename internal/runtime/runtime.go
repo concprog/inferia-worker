@@ -282,8 +282,9 @@ func (r *Runtime) LoadModel(ctx context.Context, deploymentID string, plan recip
 	d.hostPort = hostPort
 	d.endpointURL = endpoint
 	d.plan = plan
-	d.state = StateRunning
 	r.mu.Unlock()
+
+	r.setState(deploymentID, StateRunning)
 
 	return &LoadResult{EndpointURL: endpoint}, nil
 }

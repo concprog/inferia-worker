@@ -165,7 +165,7 @@ func (c *Collector) Snapshot(runtimeInfo map[string]RuntimeInfo) []control.Deplo
 			DeploymentID:        id,
 			Recipe:              recipe,
 			Model:               model,
-			RequestsTotal:       b.requestsTotal.Swap(0),
+			RequestsTotal:       b.requestsTotal.Load(),
 			ActiveRequests:      b.activeRequests.Load(),
 			RequestLatencyP50Ms: p50,
 			RequestLatencyP95Ms: p95,

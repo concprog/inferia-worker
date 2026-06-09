@@ -122,7 +122,9 @@ func NewProxy(cfg Config) fiber.Handler {
 			return c.Status(fiber.StatusBadGateway).SendString("upstream: " + err.Error())
 		}
 
-		// Record metrics
+		// Record metrics — must happen BEFORE SetBodyStream / return nil,
+		// because the handler exits immediately after that for streaming
+		// responses and the code below it is dead.
 		if cfg.Metrics != nil && deploymentID != "" {
 			recipe, model, _, _, _, ok := cfg.Runtime.DeploymentInfo(deploymentID)
 			if ok {
