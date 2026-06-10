@@ -86,13 +86,28 @@ func (r vllmRecipe) BuildPlan(in BuildInput) (Plan, error) {
 		cmd = append(cmd, "--trust-remote-code")
 	}
 
+	var planMounts []Mount
+	var planEntrypoint []string
+	if vllm.MooncakeEnabled() {
+		vllm.ApplyMooncakeFlags(cfg, envDefaults, &cmd)
+		planMounts = []Mount{{
+			Type:     "volume",
+			Source:   vllm.MooncakeConfigVolume(),
+			Target:   vllm.MooncakeConfigMountPath(),
+			ReadOnly: true,
+		}}
+		planEntrypoint = vllm.MooncakeEntrypoint()
+	}
+
 	env := mergeEnv(in.Env, envDefaults)
 
 	return Plan{
 		Image:         r.image,
 		ContainerName: containerName("inferia-vllm", in.DeploymentID),
 		Cmd:           cmd,
+		Entrypoint:    planEntrypoint,
 		Env:           env,
+		Mounts:        planMounts,
 		ContainerPort: r.port,
 		HostPort:      in.HostPort,
 		GPUIndices:    in.GPUIndices,

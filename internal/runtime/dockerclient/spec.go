@@ -19,13 +19,24 @@ type ContainerSpec struct {
 	Name            string
 	Image           string
 	Cmd             []string
+	Entrypoint      []string // overrides image entrypoint; nil → use image default
 	Env             map[string]string
+	Mounts          []Mount
 	PortBinding     PortBinding
 	NetworkName     string
 	RestartPolicy   string
 	Labels          map[string]string
 	GPUDeviceIDs    []string
 	GPUCapabilities [][]string // capability groups; each group is ANDed, groups are ORed
+}
+
+// Mount mirrors recipes.Mount in dockerclient types to avoid importing
+// the recipes package into client tests.
+type Mount struct {
+	Type     string
+	Source   string
+	Target   string
+	ReadOnly bool
 }
 
 // PortBinding describes one host:container port mapping. We always bind to
@@ -61,11 +72,23 @@ func BuildContainerSpec(p recipes.Plan, networkName string) (*ContainerSpec, err
 		"inferia.deployment_id": labelDeploymentID(p.ContainerName),
 	}
 
+	mounts := make([]Mount, len(p.Mounts))
+	for i, m := range p.Mounts {
+		mounts[i] = Mount{
+			Type:     m.Type,
+			Source:   m.Source,
+			Target:   m.Target,
+			ReadOnly: m.ReadOnly,
+		}
+	}
+
 	return &ContainerSpec{
-		Name:  p.ContainerName,
-		Image: p.Image,
-		Cmd:   p.Cmd,
-		Env:   p.Env,
+		Name:        p.ContainerName,
+		Image:       p.Image,
+		Cmd:         p.Cmd,
+		Entrypoint:  p.Entrypoint,
+		Env:         p.Env,
+		Mounts:      mounts,
 		PortBinding: PortBinding{
 			HostIP:        "127.0.0.1",
 			HostPort:      strconv.Itoa(p.HostPort),

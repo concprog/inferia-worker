@@ -22,12 +22,22 @@ import (
 type Plan struct {
 	Image         string
 	ContainerName string
-	Cmd           []string          // CMD/args; runs with the image's default entrypoint
+	Cmd           []string          // CMD/args; when Entrypoint is nil the image's default entrypoint is used
+	Entrypoint    []string          // overrides the image entrypoint; nil → use image default (preferred)
 	Env           map[string]string // env passed to the container
+	Mounts        []Mount           // volume/bind mounts
 	ContainerPort int               // port the model server listens on inside the container
 	HostPort      int               // port to bind on the host (chosen by the worker)
 	GPUIndices    []int             // GPU device indices to pass to --gpus
 	ReadyPath     string            // HTTP path used for readiness probe (200 means ready)
+}
+
+// Mount describes a Docker volume or bind mount.
+type Mount struct {
+	Type     string // "volume" or "bind"
+	Source   string
+	Target   string
+	ReadOnly bool
 }
 
 // BuildInput is what the worker passes when constructing a plan.

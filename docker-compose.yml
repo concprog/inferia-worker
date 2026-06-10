@@ -11,10 +11,37 @@
 # volume), and start heartbeating + accepting model load commands.
 
 services:
+  # mooncake-master — shared KV-cache coordination service.
+  # The gRPC master + embedded HTTP metadata server run in a single container.
+  # vLLM model containers resolve it via the inferia-models bridge network.
+  mooncake-master:
+    build: ./deploy/mooncake-master
+    container_name: mooncake-master
+    restart: unless-stopped
+    volumes:
+      - mooncake-config:/config
+    environment:
+      MOONCAKE_RPC_PORT:    "${MOONCAKE_RPC_PORT:-50063}"
+      MOONCAKE_HTTP_PORT:   "${MOONCAKE_HTTP_PORT:-8092}"
+      MOONCAKE_METRICS_PORT: "${MOONCAKE_METRICS_PORT:-9003}"
+      LOCAL_BUFFER_BYTES:   "${MOONCAKE_LOCAL_BUFFER_BYTES:-2147483648}"
+    networks:
+      - default
+      - inferia-models
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8092/metadata').read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
   worker:
     image: ${INFERIA_WORKER_IMAGE:-ghcr.io/inferiaai/inferia-worker:latest}
     container_name: inferia-worker
     restart: unless-stopped
+    depends_on:
+      mooncake-master:
+        condition: service_healthy
 
     # Required: env vars the worker reads at startup.
     environment:
@@ -30,6 +57,7 @@ services:
       READINESS_TIMEOUT_SECONDS: ${READINESS_TIMEOUT_SECONDS:-180}
       HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-5}
       MODELS_NETWORK:           ${MODELS_NETWORK:-inferia-models}
+      MOONCAKE_KV_ENABLED:     ${MOONCAKE_KV_ENABLED:-false}
       # Escape hatches for hosts where automatic GPU detection misfires.
       # The worker first tries `nvidia-smi`, then falls back to counting
       # /dev/nvidia[0-9]+ files mounted by the NVIDIA container runtime.
@@ -79,19 +107,24 @@ services:
     # worker can resolve the control plane's container hostname (e.g.
     # inferia-app). Operators using a different network can override
     # WORKER_NETWORK or remove this block.
+    # Also attached to inferia-models so the worker can resolve model containers
+    # by name during readiness probes (the worker self-attaches to this network
+    # at startup, so this is belt-and-suspenders).
     networks:
       - default
       - inferia-cp
+      - inferia-models
 
 volumes:
   worker-state:
+    driver: local
+  mooncake-config:
     driver: local
 
 networks:
   inferia-cp:
     name: ${WORKER_NETWORK:-deploy_inferia-net}
     external: true
-
-# The 'inferia-models' network is created by the worker on startup (idempotent).
-# We don't define it here so 'docker compose down -v' doesn't drop it together
-# with model containers that may still be running.
+  inferia-models:
+    name: inferia-models
+    driver: bridge

@@ -9,6 +9,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
@@ -169,16 +170,28 @@ func (e *dockerEngine) Create(ctx context.Context, spec *ContainerSpec) (string,
 	}
 
 	cfg := &container.Config{
-		Image:        spec.Image,
-		Cmd:          spec.Cmd,
-		Env:          envSlice,
+		Image:       spec.Image,
+		Cmd:         spec.Cmd,
+		Entrypoint:  spec.Entrypoint,
+		Env:         envSlice,
 		ExposedPorts: exposed,
-		Labels:       spec.Labels,
+		Labels:      spec.Labels,
 	}
 
 	hostCfg := &container.HostConfig{
 		PortBindings:  portMap,
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyMode(spec.RestartPolicy)},
+	}
+	if len(spec.Mounts) > 0 {
+		hostCfg.Mounts = make([]mount.Mount, len(spec.Mounts))
+		for i, m := range spec.Mounts {
+			hostCfg.Mounts[i] = mount.Mount{
+				Type:     mount.Type(m.Type),
+				Source:   m.Source,
+				Target:   m.Target,
+				ReadOnly: m.ReadOnly,
+			}
+		}
 	}
 	if len(spec.GPUDeviceIDs) > 0 {
 		hostCfg.Resources.DeviceRequests = []container.DeviceRequest{
