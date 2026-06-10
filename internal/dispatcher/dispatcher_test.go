@@ -429,13 +429,14 @@ vllm:avg_generation_throughput_toks_per_sec 58.3`
 	}
 
 	// ================================================================
-	// 8. SECOND-HEARTBEAT — verify cumulative counter + sliding histogram
+	// 8. SECOND-HEARTBEAT — verify cumulative counter + peak histogram
 	// ================================================================
 	t.Log("")
-	t.Log("=== SECOND HEARTBEAT: RequestsTotal is cumulative, histogram resets ===")
+	t.Log("=== SECOND HEARTBEAT: RequestsTotal is cumulative, peak histogram persists ===")
 
-	// RequestsTotal is now Load() (cumulative), so it stays at 5.
-	// The histogram is Reset() after each snapshot, so P50/P95 become 0.
+	// RequestsTotal is Load() (cumulative), so it stays at 5.
+	// The histogram is NOT reset after snapshot (PeakHistogram), so latency
+	// values from the first 5 requests survive into the second heartbeat.
 	for _, dm := range hb2.DeployMetrics {
 		if dm.DeploymentID == "dep-ollama" {
 			if dm.RequestsTotal != 5 {
@@ -443,11 +444,12 @@ vllm:avg_generation_throughput_toks_per_sec 58.3`
 			} else {
 				t.Log("  ✓ dep-ollama requests_total stays 5 (cumulative, not windowed)")
 			}
-			if dm.RequestLatencyP50Ms != 0 || dm.RequestLatencyP95Ms != 0 {
-				t.Errorf("dep-ollama latency should be 0 after histogram reset, got p50=%d p95=%d",
+			if dm.RequestLatencyP50Ms == 0 || dm.RequestLatencyP95Ms == 0 {
+				t.Errorf("dep-ollama latency should persist across heartbeats, got p50=%d p95=%d",
 					dm.RequestLatencyP50Ms, dm.RequestLatencyP95Ms)
 			} else {
-				t.Log("  ✓ dep-ollama latencies reset to 0 (sliding histogram)")
+				t.Logf("  ✓ dep-ollama latencies persist: p50=%d p95=%d (peak histogram, never reset)",
+					dm.RequestLatencyP50Ms, dm.RequestLatencyP95Ms)
 			}
 		}
 	}

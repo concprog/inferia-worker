@@ -2,76 +2,98 @@ package metrics
 
 import (
 	"sync"
-	"sync/atomic"
 )
 
-// SlidingHistogram tracks latency samples in fixed buckets.
-type SlidingHistogram struct {
-	mu      sync.RWMutex
-	buckets []int64
-	limits  []int64
-	count   atomic.Int64
+// PeakHistogram tracks latency samples in fixed buckets, retaining only the
+// last maxSamples observations in FIFO order. Unlike SlidingHistogram it is
+// never time-reset, so percentiles are always based on recent requests and
+// never return 0 for an idle window.
+type PeakHistogram struct {
+	mu         sync.Mutex
+	buckets    []int64
+	limits     []int64
+	buffer     []int64 // ring buffer of last maxSamples values
+	head       int     // next write position
+	cur        int     // current number of samples in buffer
 }
 
-func NewSlidingHistogram(limits []int64) *SlidingHistogram {
-	return &SlidingHistogram{
+func NewPeakHistogram(maxSamples int, limits []int64) *PeakHistogram {
+	return &PeakHistogram{
 		buckets: make([]int64, len(limits)),
 		limits:  limits,
+		buffer:  make([]int64, maxSamples),
 	}
 }
 
-func (h *SlidingHistogram) Observe(val int64) {
+func (h *PeakHistogram) bucketIndex(val int64) int {
+	for i, limit := range h.limits {
+		if val <= limit {
+			return i
+		}
+	}
+	return len(h.limits) - 1
+}
+
+func (h *PeakHistogram) Observe(val int64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	h.count.Add(1) 
-	for i, limit := range h.limits {
-		if val <= limit {
-			h.buckets[i]++
-			return
-		}
+	idx := h.bucketIndex(val)
+	if h.cur < len(h.buffer) {
+		h.buffer[h.head] = val
+		h.buckets[idx]++
+		h.head++
+		h.cur++
+	} else {
+		oldVal := h.buffer[h.head]
+		h.buckets[h.bucketIndex(oldVal)]--
+		h.buffer[h.head] = val
+		h.buckets[idx]++
+		h.head = (h.head + 1) % len(h.buffer)
 	}
-	h.buckets[len(h.buckets)-1]++
 }
 
-func (h *SlidingHistogram) Snapshot() (p50, p95 int64) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+func (h *PeakHistogram) Snapshot() (p50, p95 int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 
-	total := h.count.Load()
+	total := int64(h.cur)
 	if total == 0 {
 		return 0, 0
 	}
 
-	p50Target := (total*95 + 99) / 100
-	p95Target := (total*98 + 99) / 100
+	p95Target := (total*95 + 99) / 100
+	p98Target := (total*98 + 99) / 100
 
 	var sum int64
-	p50Idx, p95Idx := -1, -1
+	p95Idx, p98Idx := -1, -1
 	for i, count := range h.buckets {
 		sum += count
-		if p50Idx == -1 && sum >= p50Target {
-			p50Idx = i
-		}
 		if p95Idx == -1 && sum >= p95Target {
 			p95Idx = i
 		}
+		if p98Idx == -1 && sum >= p98Target {
+			p98Idx = i
+		}
 	}
 
-	if p50Idx != -1 {
-		p50 = h.limits[p50Idx]
-	}
 	if p95Idx != -1 {
-		p95 = h.limits[p95Idx]
+		p50 = h.limits[p95Idx]
 	}
-	return p50, p95
+	if p98Idx != -1 {
+		p95 = h.limits[p98Idx]
+	}
+	return
 }
 
-func (h *SlidingHistogram) Reset() {
+// Reset is retained for API compatibility but should NOT be called for
+// peak-based latency tracking — the whole point is to never reset.
+func (h *PeakHistogram) Reset() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for i := range h.buckets {
 		h.buckets[i] = 0
 	}
-	h.count.Store(0)
+	h.head = 0
+	h.cur = 0
 }

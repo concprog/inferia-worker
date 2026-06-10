@@ -15,7 +15,7 @@ import (
 type deploymentBucket struct {
 	requestsTotal    atomic.Int64
 	activeRequests   atomic.Int64
-	latencyHistogram *SlidingHistogram
+	latencyHistogram *PeakHistogram
 
 	recipe string
 	model  string
@@ -63,7 +63,7 @@ func (c *Collector) getBucket(id string, recipe, model string) *deploymentBucket
 	}
 
 	b = &deploymentBucket{
-		latencyHistogram: NewSlidingHistogram([]int64{
+		latencyHistogram: NewPeakHistogram(1000, []int64{
 			10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000,
 		}),
 		recipe: recipe,
@@ -174,7 +174,6 @@ func (c *Collector) Snapshot(runtimeInfo map[string]RuntimeInfo) []control.Deplo
 			Phase:               phase,
 			EngineMetrics:       b.vllmMetrics,
 		})
-		b.latencyHistogram.Reset()
 	}
 
 	return results
