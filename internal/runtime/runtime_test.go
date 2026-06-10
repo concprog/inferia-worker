@@ -409,3 +409,219 @@ func TestLoadModel_NonOllamaRecipe_DoesNotPull(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// --- LoadDeploymentGroup tests ------------------------------------------------
+
+func seqPort(start int) func() (int, error) {
+	i := start
+	return func() (int, error) {
+		p := i
+		i++
+		return p, nil
+	}
+}
+
+func makeDeploymentPlan(id string, prefCount, decCount int) recipes.DeploymentPlan {
+	return recipes.DeploymentPlan{
+		DeploymentID: id,
+		Model:        "hf://o/m",
+		Prefill:      make([]recipes.ContainerPlan, prefCount),
+		Decode:       make([]recipes.ContainerPlan, decCount),
+	}
+}
+
+func sampleContainerPlan(role recipes.KvRole, idx int) recipes.ContainerPlan {
+	return recipes.ContainerPlan{
+		Image:         "vllm-test:latest",
+		Cmd:           []string{"--model", "m"},
+		ContainerPort: 8000,
+		GPUIndices:    []int{0},
+		ReadyPath:     "/health",
+		Role:          role,
+		ReplicaIdx:    idx,
+	}
+}
+
+func TestLoadDeploymentGroup_HappyPath(t *testing.T) {
+	fc := fake.New()
+	rt := New(Config{
+		Docker:                fc,
+		Network:               "inferia-models",
+		PullTimeout:           5 * time.Second,
+		ReadinessTimeout:      2 * time.Second,
+		ReadinessPollInterval: 10 * time.Millisecond,
+		ReadinessProbe:        okProbe,
+		PrefillPortAllocator:  seqPort(19000),
+		DecodePortAllocator:   seqPort(19500),
+	})
+	ctx := context.Background()
+
+	plan := makeDeploymentPlan("dep-grp-1", 2, 2)
+	for i := range plan.Prefill {
+		plan.Prefill[i] = sampleContainerPlan(recipes.KvRoleProducer, i)
+	}
+	for i := range plan.Decode {
+		plan.Decode[i] = sampleContainerPlan(recipes.KvRoleConsumer, i)
+	}
+
+	group, err := rt.LoadDeploymentGroup(ctx, plan)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if group.ID != "dep-grp-1" {
+		t.Errorf("ID=%q", group.ID)
+	}
+	if len(group.Prefill) != 2 {
+		t.Errorf("Prefill count=%d", len(group.Prefill))
+	}
+	if len(group.Decode) != 2 {
+		t.Errorf("Decode count=%d", len(group.Decode))
+	}
+	// Must have created 4 containers total
+	if len(fc.Created) != 4 {
+		t.Errorf("expected 4 creates, got %d", len(fc.Created))
+	}
+	if len(fc.Started) != 4 {
+		t.Errorf("expected 4 starts, got %d", len(fc.Started))
+	}
+	// All ports should be unique
+	seenPorts := map[int]bool{}
+	for _, ci := range group.Prefill {
+		if seenPorts[ci.HostPort] {
+			t.Errorf("duplicate prefill port: %d", ci.HostPort)
+		}
+		seenPorts[ci.HostPort] = true
+	}
+	for _, ci := range group.Decode {
+		if seenPorts[ci.HostPort] {
+			t.Errorf("duplicate decode port: %d", ci.HostPort)
+		}
+		seenPorts[ci.HostPort] = true
+	}
+	// Group ID must appear in LoadedDeployments
+	if !contains(rt.LoadedDeployments(), "dep-grp-1") {
+		t.Errorf("LoadedDeployments missing group ID: %v", rt.LoadedDeployments())
+	}
+}
+
+func TestLoadDeploymentGroup_RollbackOnPullFailure(t *testing.T) {
+	fc := fake.New()
+	fc.PullErr = errors.New("pull failed")
+	rt := New(Config{
+		Docker:                fc,
+		Network:               "inferia-models",
+		PullTimeout:           5 * time.Second,
+		ReadinessTimeout:      2 * time.Second,
+		ReadinessPollInterval: 10 * time.Millisecond,
+		ReadinessProbe:        okProbe,
+		PrefillPortAllocator:  seqPort(19000),
+		DecodePortAllocator:   seqPort(19500),
+	})
+
+	plan := makeDeploymentPlan("dep-grp-2", 2, 1)
+	for i := range plan.Prefill {
+		plan.Prefill[i] = sampleContainerPlan(recipes.KvRoleProducer, i)
+	}
+	for i := range plan.Decode {
+		plan.Decode[i] = sampleContainerPlan(recipes.KvRoleConsumer, i)
+	}
+
+	_, err := rt.LoadDeploymentGroup(context.Background(), plan)
+	if err == nil {
+		t.Fatal("expected error from simulated pull failure")
+	}
+	if !strings.Contains(err.Error(), "pull") {
+		t.Errorf("error=%q", err)
+	}
+	// No containers should have been created
+	if len(fc.Created) != 0 {
+		t.Errorf("expected 0 creates after pull failure, got %d", len(fc.Created))
+	}
+	if contains(rt.LoadedDeployments(), "dep-grp-2") {
+		t.Errorf("failed group must not be in LoadedDeployments")
+	}
+}
+
+func TestLoadDeploymentGroup_RollbackOnCreateFailure(t *testing.T) {
+	fc := fake.New()
+	fc.CreateErr = errors.New("create boom")
+	rt := New(Config{
+		Docker:                fc,
+		Network:               "inferia-models",
+		PullTimeout:           5 * time.Second,
+		ReadinessTimeout:      2 * time.Second,
+		ReadinessPollInterval: 10 * time.Millisecond,
+		ReadinessProbe:        okProbe,
+		PrefillPortAllocator:  seqPort(19000),
+		DecodePortAllocator:   seqPort(19500),
+	})
+
+	plan := makeDeploymentPlan("dep-grp-2b", 1, 0)
+	plan.Prefill[0] = sampleContainerPlan(recipes.KvRoleProducer, 0)
+
+	_, err := rt.LoadDeploymentGroup(context.Background(), plan)
+	if err == nil {
+		t.Fatal("expected error from simulated create failure")
+	}
+	if len(fc.Created) != 0 {
+		t.Errorf("expected 0 creates after error")
+	}
+}
+
+func TestUnloadDeploymentGroup_CleansUp(t *testing.T) {
+	fc := fake.New()
+	rt := New(Config{
+		Docker:                fc,
+		Network:               "inferia-models",
+		PullTimeout:           5 * time.Second,
+		ReadinessTimeout:      2 * time.Second,
+		ReadinessPollInterval: 10 * time.Millisecond,
+		ReadinessProbe:        okProbe,
+		PrefillPortAllocator:  seqPort(19000),
+		DecodePortAllocator:   seqPort(19500),
+	})
+
+	plan := makeDeploymentPlan("dep-grp-3", 1, 1)
+	plan.Prefill[0] = sampleContainerPlan(recipes.KvRoleProducer, 0)
+	plan.Decode[0] = sampleContainerPlan(recipes.KvRoleConsumer, 0)
+
+	group, err := rt.LoadDeploymentGroup(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !contains(rt.LoadedDeployments(), "dep-grp-3") {
+		t.Fatal("group not loaded")
+	}
+
+	if err := rt.UnloadDeploymentGroup(context.Background(), "dep-grp-3"); err != nil {
+		t.Fatalf("UnloadDeploymentGroup: %v", err)
+	}
+	// Must have stopped and removed all containers
+	if len(fc.Stopped) != 2 {
+		t.Errorf("expected 2 stops, got %d", len(fc.Stopped))
+	}
+	if len(fc.Removed) != 2 {
+		t.Errorf("expected 2 removes, got %d", len(fc.Removed))
+	}
+	// Group must not be in the registry anymore
+	if contains(rt.LoadedDeployments(), "dep-grp-3") {
+		t.Errorf("group still listed after unload")
+	}
+	// Container IDs from the group should no longer exist in the fake
+	for _, ci := range group.Prefill {
+		if _, err := fc.Inspect(context.Background(), ci.ContainerID); err == nil {
+			t.Errorf("prefill container %s still exists after unload", ci.ContainerID)
+		}
+	}
+}
+
+func TestUnloadDeploymentGroup_UnknownIDNoError(t *testing.T) {
+	fc := fake.New()
+	rt := New(Config{
+		Docker:  fc,
+		Network: "inferia-models",
+	})
+	if err := rt.UnloadDeploymentGroup(context.Background(), "does-not-exist"); err != nil {
+		t.Errorf("expected nil for unknown group, got %v", err)
+	}
+}

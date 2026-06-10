@@ -14,6 +14,14 @@ import (
 	"github.com/inferia/inferia-worker/internal/runtime/recipes"
 )
 
+// DeploymentRegistrar is the narrow interface the dispatcher uses to
+// register/deregister disagg deployments with the proxy registry.
+// Implemented by *inference.DeploymentRegistry.
+type DeploymentRegistrar interface {
+	RegisterDisagg(id, model string, group *runtime.DeploymentGroup)
+	Deregister(id string)
+}
+
 // Runtime defines the subset of *runtime.Runtime operations needed by the
 // dispatcher. Avoids packages importing each other recursively.
 type Runtime interface {
@@ -22,6 +30,10 @@ type Runtime interface {
 	LoadedDeployments() []string
 	DeploymentInfo(deploymentID string) (recipe, model, phase string, pullDur, startDur time.Duration, ok bool)
 	EndpointURL(deploymentID string) string
+
+	// Disagg (multi-container) lifecycle.
+	LoadDeploymentGroup(ctx context.Context, plan recipes.DeploymentPlan) (*runtime.DeploymentGroup, error)
+	UnloadDeploymentGroup(ctx context.Context, id string) error
 }
 
 // Dispatcher implements control.Dispatcher. It is the primary adapter between
@@ -32,6 +44,7 @@ type Dispatcher struct {
 	Metrics   *metrics.Collector
 	GPUName   string
 	GPUMemMiB uint64
+	Registry  DeploymentRegistrar // optional; nil = no disagg support
 }
 
 func NewDispatcher(rt Runtime, tel TelemetryReader, mc *metrics.Collector, gpuName string, gpuMem uint64) *Dispatcher {
@@ -59,7 +72,20 @@ type TelemetryReader interface {
 // LoadModel converts the WS body into a recipes.Plan and asks the runtime to
 // load it. Returning a non-nil error becomes CommandResult{status:"failed"}
 // in the control package.
+//
+// When body.Recipe names a MultiContainerBuilder and body.PrefillReplicas > 0,
+// it routes to the disagg (multi-container) path instead.
 func (d *Dispatcher) LoadModel(ctx context.Context, body control.LoadModelBody) (string, error) {
+	// Disagg path: multi-container prefill/decode split.
+	if body.PrefillReplicas > 0 {
+		mc, err := recipes.MultiGet(body.Recipe)
+		if err != nil {
+			return "", err
+		}
+		return d.loadDeploymentGroup(ctx, mc, body)
+	}
+
+	// Single-container path — unchanged.
 	r, err := recipes.Get(body.Recipe)
 	if err != nil {
 		return "", err
@@ -93,8 +119,45 @@ func (d *Dispatcher) LoadModel(ctx context.Context, body control.LoadModelBody) 
 	return res.EndpointURL, nil
 }
 
-// UnloadModel is a direct passthrough.
+// loadDeploymentGroup builds and launches a disagg deployment group, then
+// registers it with the proxy registry.
+func (d *Dispatcher) loadDeploymentGroup(ctx context.Context, mc recipes.MultiContainerBuilder, body control.LoadModelBody) (string, error) {
+	plan, err := mc.BuildDeploymentPlan(recipes.BuildInput{
+		DeploymentID:     body.DeploymentID,
+		ArtifactURI:      body.Model.ArtifactURI,
+		Config:           body.Config,
+		GPUIndices:       body.GPUIndices,
+		HostPort:         1, // placeholder — runtime allocates per-container
+		Env:              body.Env,
+		GPUName:          d.GPUName,
+		GPUMemoryMiB:     d.GPUMemMiB,
+		PrefillReplicas:  body.PrefillReplicas,
+		DecodeReplicas:   body.DecodeReplicas,
+	})
+	if err != nil {
+		return "", err
+	}
+	group, err := d.Rt.LoadDeploymentGroup(ctx, plan)
+	if err != nil {
+		return "", err
+	}
+	if d.Registry != nil {
+		d.Registry.RegisterDisagg(body.DeploymentID, plan.Model, group)
+	}
+	if len(group.Prefill) > 0 {
+		return fmt.Sprintf("http://127.0.0.1:%d", group.Prefill[0].HostPort), nil
+	}
+	return "", nil
+}
+
+// UnloadModel stops and removes a deployment. It tries both the disagg group
+// path and the single-container path — both are idempotent for absent IDs.
 func (d *Dispatcher) UnloadModel(ctx context.Context, body control.UnloadModelBody) error {
+	if d.Registry != nil {
+		d.Registry.Deregister(body.DeploymentID)
+	}
+	// Try both; at most one will actually have containers.
+	_ = d.Rt.UnloadDeploymentGroup(ctx, body.DeploymentID)
 	err := d.Rt.UnloadModel(ctx, body.DeploymentID)
 	if err == nil && d.Metrics != nil {
 		d.Metrics.RemoveDeployment(body.DeploymentID)

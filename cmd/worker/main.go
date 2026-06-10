@@ -138,6 +138,7 @@ func main() {
 	ready := healthz.New()
 
 	mc := metrics.NewCollector()
+	reg := inference.NewDeploymentRegistry()
 
 	// Fiber app.
 	app := fiber.New(fiber.Config{
@@ -173,7 +174,8 @@ func main() {
 		Resolver: inference.PathResolver{
 			Header: "X-Inferia-Deployment-Id",
 		},
-		Metrics: mc,
+		Metrics:  mc,
+		Registry: reg,
 	}))
 	healthz.Register(app, ready)
 
@@ -191,6 +193,7 @@ func main() {
 		gpuName,
 		gpuMemMiB,
 	)
+	disp.Registry = reg
 
 	ch := &control.Channel{
 		ChannelURL: toWS(cfg.ControlPlaneURL) + "/v1/workers/channel",
@@ -261,6 +264,12 @@ func (a *runtimeAdapter) DeploymentInfo(deploymentID string) (recipe, model, pha
 	return a.r.DeploymentInfo(deploymentID)
 }
 func (a *runtimeAdapter) EndpointURL(deploymentID string) string { return a.r.EndpointURL(deploymentID) }
+func (a *runtimeAdapter) LoadDeploymentGroup(ctx context.Context, plan recipes.DeploymentPlan) (*runtime.DeploymentGroup, error) {
+	return a.r.LoadDeploymentGroup(ctx, plan)
+}
+func (a *runtimeAdapter) UnloadDeploymentGroup(ctx context.Context, id string) error {
+	return a.r.UnloadDeploymentGroup(ctx, id)
+}
 
 // hostTelemetry reads CPU/memory/GPU from the host.
 type hostTelemetry struct{}

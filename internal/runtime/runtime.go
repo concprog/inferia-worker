@@ -31,6 +31,11 @@ type Config struct {
 	ReadinessProbe        func(url string) bool // injected for tests
 	HostPortAllocator     func() (int, error)   // returns next host port; injectable for tests
 	AdvertiseHost         string                // e.g. "127.0.0.1" — host portion of EndpointURL
+
+	// Optional per-role port allocators for disagg (prefill/decode split).
+	// Default ranges: prefill 19000-19499, decode 19500-19999.
+	PrefillPortAllocator func() (int, error)
+	DecodePortAllocator  func() (int, error)
 }
 
 // Runtime is the per-worker model lifecycle owner.
@@ -38,7 +43,8 @@ type Runtime struct {
 	cfg Config
 
 	mu          sync.Mutex
-	deployments map[string]*deployment // by deploymentID
+	deployments map[string]*deployment   // by deploymentID (single-container)
+	groups      map[string]*DeploymentGroup // by deploymentID (disagg)
 }
 
 type deployment struct {
@@ -78,12 +84,21 @@ func New(cfg Config) *Runtime {
 		alloc := NewPortAllocator(19000, 19999)
 		cfg.HostPortAllocator = alloc.Next
 	}
+	if cfg.PrefillPortAllocator == nil {
+		a := NewPortAllocator(19000, 19499)
+		cfg.PrefillPortAllocator = a.Next
+	}
+	if cfg.DecodePortAllocator == nil {
+		a := NewPortAllocator(19500, 19999)
+		cfg.DecodePortAllocator = a.Next
+	}
 	if cfg.AdvertiseHost == "" {
 		cfg.AdvertiseHost = "127.0.0.1"
 	}
 	return &Runtime{
 		cfg:         cfg,
 		deployments: map[string]*deployment{},
+		groups:      map[string]*DeploymentGroup{},
 	}
 }
 
@@ -126,15 +141,19 @@ func (r *Runtime) EnsureNetwork(ctx context.Context) error {
 	return r.cfg.Docker.EnsureNetwork(ctx, r.cfg.Network)
 }
 
-// LoadedDeployments returns the ids currently in the running state.
+// LoadedDeployments returns the ids currently in the running state (both
+// single-container and disagg groups).
 func (r *Runtime) LoadedDeployments() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]string, 0, len(r.deployments))
+	out := make([]string, 0, len(r.deployments)+len(r.groups))
 	for id, d := range r.deployments {
 		if d.state == StateRunning {
 			out = append(out, id)
 		}
+	}
+	for id := range r.groups {
+		out = append(out, id)
 	}
 	return out
 }
@@ -311,6 +330,145 @@ func (r *Runtime) UnloadModel(ctx context.Context, deploymentID string) error {
 	}
 	r.drop(deploymentID)
 	return nil
+}
+
+// LoadDeploymentGroup launches all containers in the deployment plan as a
+// single unit. If any container fails, previously launched containers in the
+// group are stopped and removed (rollback). The caller is responsible for
+// registering the group with the proxy registry.
+func (r *Runtime) LoadDeploymentGroup(ctx context.Context, plan recipes.DeploymentPlan) (*DeploymentGroup, error) {
+	group := &DeploymentGroup{
+		ID:      plan.DeploymentID,
+		Model:   plan.Model,
+		Prefill: make([]ContainerInfo, len(plan.Prefill)),
+		Decode:  make([]ContainerInfo, len(plan.Decode)),
+	}
+
+	register := func(info *ContainerInfo, cp recipes.ContainerPlan, port int) {
+		info.HostPort = port
+		info.Role = cp.Role
+		info.ReplicaIdx = cp.ReplicaIdx
+	}
+
+	// Pull image once for all replicas.
+	pullCtx, cancel := context.WithTimeout(ctx, r.cfg.PullTimeout)
+	if err := r.cfg.Docker.Pull(pullCtx, plan.Prefill[0].Image, nil); err != nil {
+		cancel()
+		return nil, fmt.Errorf("pull: %w", err)
+	}
+	cancel()
+
+	// --- prefill replicas ---
+	for i, cp := range plan.Prefill {
+		hostPort, err := r.cfg.PrefillPortAllocator()
+		if err != nil {
+			r.rollbackGroup(ctx, group, i, 0)
+			return nil, fmt.Errorf("prefill port %d: %w", i, err)
+		}
+		name := fmt.Sprintf("inferia-vllm-p-%s-%d", plan.DeploymentID, i)
+		p := cp.ToPlan(name, hostPort)
+		cid, err := r.createAndStartContainer(ctx, p)
+		if err != nil {
+			r.rollbackGroup(ctx, group, i, 0)
+			return nil, fmt.Errorf("prefill %d: %w", i, err)
+		}
+		info := &group.Prefill[i]
+		info.ContainerID = cid
+		register(info, cp, hostPort)
+	}
+
+	// --- decode replicas ---
+	for i, cp := range plan.Decode {
+		hostPort, err := r.cfg.DecodePortAllocator()
+		if err != nil {
+			r.rollbackGroup(ctx, group, len(plan.Prefill), i)
+			return nil, fmt.Errorf("decode port %d: %w", i, err)
+		}
+		name := fmt.Sprintf("inferia-vllm-d-%s-%d", plan.DeploymentID, i)
+		p := cp.ToPlan(name, hostPort)
+		cid, err := r.createAndStartContainer(ctx, p)
+		if err != nil {
+			r.rollbackGroup(ctx, group, len(plan.Prefill), i)
+			return nil, fmt.Errorf("decode %d: %w", i, err)
+		}
+		info := &group.Decode[i]
+		info.ContainerID = cid
+		register(info, cp, hostPort)
+	}
+
+	r.mu.Lock()
+	r.groups[plan.DeploymentID] = group
+	r.mu.Unlock()
+	return group, nil
+}
+
+// UnloadDeploymentGroup stops and removes all containers in an existing group.
+// Safe to call for unknown or already-unloaded group IDs.
+func (r *Runtime) UnloadDeploymentGroup(ctx context.Context, id string) error {
+	r.mu.Lock()
+	g, ok := r.groups[id]
+	delete(r.groups, id)
+	r.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	for _, ci := range g.Prefill {
+		if ci.ContainerID != "" {
+			_ = r.cfg.Docker.Stop(ctx, ci.ContainerID, 10)
+			_ = r.cfg.Docker.Remove(ctx, ci.ContainerID)
+		}
+	}
+	for _, ci := range g.Decode {
+		if ci.ContainerID != "" {
+			_ = r.cfg.Docker.Stop(ctx, ci.ContainerID, 10)
+			_ = r.cfg.Docker.Remove(ctx, ci.ContainerID)
+		}
+	}
+	return nil
+}
+
+// rollbackGroup stops and removes all containers started so far in a group.
+// prefillDone is the count of successfully launched prefill replicas
+// (exclusive, i.e. the index at which failure occurred); decodeDone is the
+// count of successfully launched decode replicas.
+func (r *Runtime) rollbackGroup(ctx context.Context, g *DeploymentGroup, prefillDone, decodeDone int) {
+	for i := 0; i < prefillDone; i++ {
+		if g.Prefill[i].ContainerID != "" {
+			_ = r.cfg.Docker.Stop(ctx, g.Prefill[i].ContainerID, 5)
+			_ = r.cfg.Docker.Remove(ctx, g.Prefill[i].ContainerID)
+		}
+	}
+	for i := 0; i < decodeDone; i++ {
+		if g.Decode[i].ContainerID != "" {
+			_ = r.cfg.Docker.Stop(ctx, g.Decode[i].ContainerID, 5)
+			_ = r.cfg.Docker.Remove(ctx, g.Decode[i].ContainerID)
+		}
+	}
+}
+
+// createAndStartContainer builds the spec, creates, starts, and waits for
+// readiness. Returns the container ID on success.
+func (r *Runtime) createAndStartContainer(ctx context.Context, plan recipes.Plan) (string, error) {
+	spec, err := dockerclient.BuildContainerSpec(plan, r.cfg.Network)
+	if err != nil {
+		return "", fmt.Errorf("spec: %w", err)
+	}
+	cid, err := r.cfg.Docker.Create(ctx, spec)
+	if err != nil {
+		return "", fmt.Errorf("create: %w", err)
+	}
+	if err := r.cfg.Docker.Start(ctx, cid); err != nil {
+		_ = r.cfg.Docker.Remove(ctx, cid)
+		return "", fmt.Errorf("start: %w", err)
+	}
+	endpoint := fmt.Sprintf("http://%s:%d", r.cfg.AdvertiseHost, plan.HostPort)
+	probeURL := endpoint + plan.ReadyPath
+	if !r.waitReady(ctx, probeURL) {
+		_ = r.cfg.Docker.Stop(ctx, cid, 5)
+		_ = r.cfg.Docker.Remove(ctx, cid)
+		return "", errors.New("readiness probe timed out")
+	}
+	return cid, nil
 }
 
 // internal mutators -----------------------------------------------------------

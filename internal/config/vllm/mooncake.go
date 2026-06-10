@@ -26,6 +26,30 @@ func ApplyMooncakeFlags(cfg map[string]any, env map[string]string, cmd *[]string
 	)
 }
 
+// ApplyMooncakePrefillFlags is the prefill (kv_producer) variant. Safe to call
+// only when MooncakeEnabled() returns true.
+func ApplyMooncakePrefillFlags(cfg map[string]any, env map[string]string, cmd *[]string) {
+	cfg["enable_prefix_caching"] = true
+	env["MOONCAKE_CONFIG_PATH"] = MooncakeConfigMountPath() + "/mooncake_config.json"
+	env["PYTHONHASHSEED"] = "0"
+	*cmd = append(*cmd,
+		"--kv-transfer-config",
+		`{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_producer"}`,
+	)
+}
+
+// ApplyMooncakeDecodeFlags is the decode (kv_consumer) variant. Safe to call
+// only when MooncakeEnabled() returns true.
+func ApplyMooncakeDecodeFlags(cfg map[string]any, env map[string]string, cmd *[]string) {
+	cfg["enable_prefix_caching"] = true
+	env["MOONCAKE_CONFIG_PATH"] = MooncakeConfigMountPath() + "/mooncake_config.json"
+	env["PYTHONHASHSEED"] = "0"
+	*cmd = append(*cmd,
+		"--kv-transfer-config",
+		`{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_consumer"}`,
+	)
+}
+
 // MooncakeEntrypoint returns an entrypoint override that installs the
 // mooncake-transfer-engine pip package at container startup, then execs
 // the original command. This avoids building a derived vLLM image.

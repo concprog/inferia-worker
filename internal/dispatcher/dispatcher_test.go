@@ -20,6 +20,11 @@ type fakeRT struct {
 	loadErr     error
 	unloadErr   error
 	unloadedIDs []string
+
+	// disagg tracking
+	groupLoadCalls []recipes.DeploymentPlan
+	groupLoadErr   error
+	groupUnloaded  []string
 }
 
 func newFakeRT() *fakeRT { return &fakeRT{loaded: map[string]string{}} }
@@ -55,6 +60,48 @@ func (f *fakeRT) DeploymentInfo(deploymentID string) (recipe, model, phase strin
 }
 
 func (f *fakeRT) EndpointURL(deploymentID string) string { return f.loaded[deploymentID] }
+
+func (f *fakeRT) LoadDeploymentGroup(ctx context.Context, plan recipes.DeploymentPlan) (*runtime.DeploymentGroup, error) {
+	f.groupLoadCalls = append(f.groupLoadCalls, plan)
+	if f.groupLoadErr != nil {
+		return nil, f.groupLoadErr
+	}
+	group := &runtime.DeploymentGroup{
+		ID:    plan.DeploymentID,
+		Model: plan.Model,
+	}
+	for i, cp := range plan.Prefill {
+		group.Prefill = append(group.Prefill, runtime.ContainerInfo{HostPort: 19000 + i, Role: cp.Role})
+	}
+	for i, cp := range plan.Decode {
+		group.Decode = append(group.Decode, runtime.ContainerInfo{HostPort: 19500 + i, Role: cp.Role})
+	}
+	return group, nil
+}
+
+func (f *fakeRT) UnloadDeploymentGroup(ctx context.Context, id string) error {
+	f.groupUnloaded = append(f.groupUnloaded, id)
+	return nil
+}
+
+// fakeRegistrar implements DeploymentRegistrar for tests.
+type fakeRegistrar struct {
+	registered map[string]string // id -> model
+	deregistered []string
+}
+
+func newFakeRegistrar() *fakeRegistrar {
+	return &fakeRegistrar{registered: map[string]string{}}
+}
+
+func (r *fakeRegistrar) RegisterDisagg(id, model string, group *runtime.DeploymentGroup) {
+	r.registered[id] = model
+}
+
+func (r *fakeRegistrar) Deregister(id string) {
+	r.deregistered = append(r.deregistered, id)
+	delete(r.registered, id)
+}
 
 type fakeTelemetry struct{ data map[string]string }
 
@@ -456,4 +503,131 @@ vllm:avg_generation_throughput_toks_per_sec 58.3`
 
 	t.Log("")
 	t.Log("=== ALL VERIFIED: metrics pipeline end-to-end ==")
+}
+
+// --- Disagg (multi-container) dispatcher tests -------------------------------
+
+func TestLoadModel_DisaggPath(t *testing.T) {
+	rt := newFakeRT()
+	reg := newFakeRegistrar()
+	d := &Dispatcher{Rt: rt, Registry: reg}
+
+	endpoint, err := d.LoadModel(context.Background(), control.LoadModelBody{
+		DeploymentID:     "dep-disagg-1",
+		Recipe:           "vllm-prefill-decode",
+		Model:            control.ModelRef{ArtifactURI: "hf://o/m"},
+		GPUIndices:       []int{0, 1},
+		Port:             1,
+		PrefillReplicas:  2,
+		DecodeReplicas:   2,
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if endpoint == "" {
+		t.Errorf("expected non-empty endpoint URL")
+	}
+	if len(rt.groupLoadCalls) != 1 {
+		t.Fatalf("expected 1 group load call, got %d", len(rt.groupLoadCalls))
+	}
+	plan := rt.groupLoadCalls[0]
+	if len(plan.Prefill) != 2 {
+		t.Errorf("Prefill replicas: got %d, want 2", len(plan.Prefill))
+	}
+	if len(plan.Decode) != 2 {
+		t.Errorf("Decode replicas: got %d, want 2", len(plan.Decode))
+	}
+	// Must have registered with the registry
+	if _, ok := reg.registered["dep-disagg-1"]; !ok {
+		t.Errorf("deployment not registered with registry")
+	}
+	if reg.registered["dep-disagg-1"] != "o/m" {
+		t.Errorf("registered model=%q (want 'o/m', the stripped URI)", reg.registered["dep-disagg-1"])
+	}
+}
+
+func TestLoadModel_DisaggPathDefaultsReplicas(t *testing.T) {
+	rt := newFakeRT()
+	d := &Dispatcher{Rt: rt}
+
+	_, err := d.LoadModel(context.Background(), control.LoadModelBody{
+		DeploymentID:     "dep-disagg-2",
+		Recipe:           "vllm-prefill-decode",
+		Model:            control.ModelRef{ArtifactURI: "hf://o/m"},
+		GPUIndices:       []int{0},
+		Port:             1,
+		PrefillReplicas:  1,
+		DecodeReplicas:   1,
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if len(rt.groupLoadCalls) != 1 {
+		t.Fatalf("expected 1 group load call, got %d", len(rt.groupLoadCalls))
+	}
+}
+
+func TestLoadModel_DisaggWithPrefillReplicasZero_FallsThroughToSingle(t *testing.T) {
+	// When PrefillReplicas is 0 (not set by old CPs), the dispatcher must
+	// NOT take the disagg path — falls through to the normal path.
+	rt := newFakeRT()
+	d := &Dispatcher{Rt: rt}
+
+	_, err := d.LoadModel(context.Background(), control.LoadModelBody{
+		DeploymentID: "dep-single",
+		Recipe:       "vllm",
+		Model:        control.ModelRef{ArtifactURI: "hf://o/m"},
+		GPUIndices:   []int{0},
+		Port:         1234,
+		// PrefillReplicas is 0 (zero value) — no disagg path
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if len(rt.loadCalls) != 1 {
+		t.Errorf("expected 1 single load call, got %d", len(rt.loadCalls))
+	}
+	if len(rt.groupLoadCalls) != 0 {
+		t.Errorf("expected 0 group calls, got %d", len(rt.groupLoadCalls))
+	}
+}
+
+func TestLoadModel_DisaggRegistryNotSet_NoPanic(t *testing.T) {
+	rt := newFakeRT()
+	// Registry is nil — must not panic
+	d := &Dispatcher{Rt: rt}
+
+	_, err := d.LoadModel(context.Background(), control.LoadModelBody{
+		DeploymentID:     "dep-disagg-3",
+		Recipe:           "vllm-prefill-decode",
+		Model:            control.ModelRef{ArtifactURI: "hf://o/m"},
+		GPUIndices:       []int{0},
+		Port:             1,
+		PrefillReplicas:  1,
+		DecodeReplicas:   1,
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if len(rt.groupLoadCalls) != 1 {
+		t.Errorf("expected 1 group load call, got %d", len(rt.groupLoadCalls))
+	}
+}
+
+func TestUnloadModel_DisaggPath(t *testing.T) {
+	rt := newFakeRT()
+	reg := newFakeRegistrar()
+	reg.registered["dep-disagg-1"] = "hf://o/m"
+	d := &Dispatcher{Rt: rt, Registry: reg}
+
+	if err := d.UnloadModel(context.Background(), control.UnloadModelBody{DeploymentID: "dep-disagg-1"}); err != nil {
+		t.Fatalf("UnloadModel: %v", err)
+	}
+	// Must have deregistered and unloaded the group
+	if len(reg.deregistered) != 1 || reg.deregistered[0] != "dep-disagg-1" {
+		t.Errorf("deregister not called correctly: %v", reg.deregistered)
+	}
+	if len(rt.groupUnloaded) != 1 || rt.groupUnloaded[0] != "dep-disagg-1" {
+		t.Errorf("group not unloaded: %v", rt.groupUnloaded)
+	}
 }

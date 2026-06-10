@@ -5,6 +5,8 @@
 package inference
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -27,6 +29,7 @@ type Config struct {
 	Runtime  EndpointResolver
 	Resolver PathResolver
 	Metrics  *metrics.Collector
+	Registry *DeploymentRegistry // nil = legacy single-container mode
 }
 
 // PathResolver decides which deployment a request targets. If Resolver is set
@@ -60,7 +63,8 @@ var httpClient = &http.Client{
 		}).DialContext,
 		// Don't buffer streaming bodies; flush as bytes arrive.
 		DisableCompression:    true,
-		MaxIdleConns:          20,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 0, // unlimited; some LLMs are slow to first token
@@ -68,7 +72,9 @@ var httpClient = &http.Client{
 }
 
 // NewProxy returns a Fiber handler that forwards /v1/* to the resolved
-// endpoint. Other paths pass through untouched (so /healthz, /metrics, etc.
+// endpoint. When cfg.Registry contains a ModeDisagg entry for the
+// deployment it performs two-phase P→D routing via kv_transfer_params.
+// Other paths pass through untouched (so /healthz, /metrics, etc.
 // remain locally served).
 func NewProxy(cfg Config) fiber.Handler {
 	return func(c *fiber.Ctx) error {
@@ -76,6 +82,16 @@ func NewProxy(cfg Config) fiber.Handler {
 			return c.Next()
 		}
 		deploymentID := cfg.Resolver.Resolve(c)
+
+		// Disagg path: route through P→D handoff.
+		if cfg.Registry != nil {
+			entry, ok := cfg.Registry.LookupByID(deploymentID)
+			if ok && entry.Mode == ModeDisagg {
+				return handleDisagg(c, entry)
+			}
+		}
+
+		// Legacy single-endpoint path.
 		base := ""
 		if deploymentID != "" {
 			base = cfg.Runtime.EndpointURL(deploymentID)
@@ -148,6 +164,117 @@ func NewProxy(cfg Config) fiber.Handler {
 		c.Context().SetBodyStream(&streamReader{r: resp.Body}, -1)
 		return nil
 	}
+}
+
+// handleDisagg performs two-phase P→D routing for disagg deployments.
+// Phase 1: send modified body to P (stream=false, max_tokens=1, do_remote_decode=true).
+// Phase 2: extract kv_transfer_params from P response, inject into original
+// body, send to D, and stream the response to the caller.
+func handleDisagg(c *fiber.Ctx, entry *DeploymentEntry) error {
+	body := c.Body()
+
+	// --- Phase 1: Prefill ---
+	prefillBody, err := buildPrefillBody(body)
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).SendString("prefill build: " + err.Error())
+	}
+	prefillURL := entry.Group.NextPrefill() + c.Path()
+	if q := string(c.Request().URI().QueryString()); q != "" {
+		prefillURL += "?" + q
+	}
+	prefillReq, err := http.NewRequestWithContext(c.UserContext(), c.Method(), prefillURL, bytes.NewReader(prefillBody))
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).SendString("prefill req: " + err.Error())
+	}
+	c.Request().Header.VisitAll(func(k, v []byte) {
+		if isHopByHop(string(k)) {
+			return
+		}
+		prefillReq.Header.Add(string(k), string(v))
+	})
+	prefillResp, err := httpClient.Do(prefillReq)
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).SendString("prefill: " + err.Error())
+	}
+	defer prefillResp.Body.Close()
+	if prefillResp.StatusCode != http.StatusOK {
+		return c.Status(fiber.StatusBadGateway).SendString("prefill: upstream error")
+	}
+	var prefillResult map[string]any
+	if err := json.NewDecoder(prefillResp.Body).Decode(&prefillResult); err != nil {
+		return c.Status(fiber.StatusBadGateway).SendString("prefill decode: "+err.Error())
+	}
+	kvParams, ok := prefillResult["kv_transfer_params"]
+	if !ok {
+		return c.Status(fiber.StatusBadGateway).SendString("prefill: missing kv_transfer_params")
+	}
+
+	// --- Phase 2: Decode ---
+	decodeBody, err := buildDecodeBody(body, kvParams)
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).SendString("decode build: " + err.Error())
+	}
+	decodeURL := entry.Group.NextDecode() + c.Path()
+	if q := string(c.Request().URI().QueryString()); q != "" {
+		decodeURL += "?" + q
+	}
+	decodeReq, err := http.NewRequestWithContext(c.UserContext(), c.Method(), decodeURL, bytes.NewReader(decodeBody))
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).SendString("decode req: " + err.Error())
+	}
+	c.Request().Header.VisitAll(func(k, v []byte) {
+		if isHopByHop(string(k)) {
+			return
+		}
+		decodeReq.Header.Add(string(k), string(v))
+	})
+	decodeResp, err := httpClient.Do(decodeReq)
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).SendString("decode: " + err.Error())
+	}
+
+	// Stream decode response to client.
+	for k, vs := range decodeResp.Header {
+		if isHopByHop(k) {
+			continue
+		}
+		for _, v := range vs {
+			c.Response().Header.Add(k, v)
+		}
+	}
+	c.Status(decodeResp.StatusCode)
+	c.Context().SetBodyStream(&streamReader{r: decodeResp.Body}, -1)
+	return nil
+}
+
+// buildPrefillBody clones the original request JSON and sets stream=false,
+// max_tokens=1, do_remote_decode=true for the prefill phase.
+func buildPrefillBody(original []byte) ([]byte, error) {
+	if len(original) == 0 {
+		return original, nil
+	}
+	var body map[string]any
+	if err := json.Unmarshal(original, &body); err != nil {
+		return nil, err
+	}
+	body["stream"] = false
+	body["max_tokens"] = 1.0
+	body["do_remote_decode"] = true
+	return json.Marshal(body)
+}
+
+// buildDecodeBody clones the original request JSON and injects
+// kv_transfer_params from the prefill phase for the decode phase.
+func buildDecodeBody(original []byte, kvParams any) ([]byte, error) {
+	if len(original) == 0 {
+		return original, nil
+	}
+	var body map[string]any
+	if err := json.Unmarshal(original, &body); err != nil {
+		return nil, err
+	}
+	body["kv_transfer_params"] = kvParams
+	return json.Marshal(body)
 }
 
 // streamReader forwards reads from the upstream body. fasthttp will call

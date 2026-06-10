@@ -50,6 +50,12 @@ type BuildInput struct {
 	Env          map[string]string
 	GPUName      string // populated by dispatcher from telemetry.ReadGPU()
 	GPUMemoryMiB uint64 // populated by dispatcher from telemetry.ReadGPU()
+
+	// PrefillReplicas and DecodeReplicas are used only by multi-container
+	// recipes (vllm-prefill-decode) to specify replica counts. Zero means
+	// "not a disagg deployment" and is the default for existing recipes.
+	PrefillReplicas int `json:"prefill_replicas,omitempty"`
+	DecodeReplicas  int `json:"decode_replicas,omitempty"`
 }
 
 // Recipe builds a Plan for a particular engine/runtime.

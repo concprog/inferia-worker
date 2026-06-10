@@ -515,3 +515,160 @@ func TestBuildPlan_HostPortRange(t *testing.T) {
 		t.Errorf("expected ok for HostPort=65535: %v", err)
 	}
 }
+
+// --- Multi-container (disagg) recipe tests -----------------------------------
+
+func TestMultiRegistry_KnownRecipes(t *testing.T) {
+	if _, err := MultiGet("vllm-prefill-decode"); err != nil {
+		t.Errorf("MultiGet(vllm-prefill-decode): %v", err)
+	}
+}
+
+func TestMultiRegistry_UnknownRecipe(t *testing.T) {
+	if _, err := MultiGet("nope"); err == nil {
+		t.Errorf("expected error for unknown multi recipe")
+	}
+}
+
+func TestBuildPlan_VLLMPrefillDecode_Defaults(t *testing.T) {
+	mc, err := MultiGet("vllm-prefill-decode")
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	plan, err := mc.BuildDeploymentPlan(BuildInput{
+		DeploymentID:     "dep-disagg-1",
+		ArtifactURI:      "hf://meta-llama/Llama-3.1-8B-Instruct",
+		Config:           nil,
+		GPUIndices:       []int{0, 1},
+		HostPort:         1,
+		PrefillReplicas:  2,
+		DecodeReplicas:   2,
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if plan.DeploymentID != "dep-disagg-1" {
+		t.Errorf("DeploymentID=%q", plan.DeploymentID)
+	}
+	if plan.Model != "meta-llama/Llama-3.1-8B-Instruct" {
+		t.Errorf("Model=%q", plan.Model)
+	}
+	if len(plan.Prefill) != 2 {
+		t.Errorf("Prefill replicas: got %d, want 2", len(plan.Prefill))
+	}
+	if len(plan.Decode) != 2 {
+		t.Errorf("Decode replicas: got %d, want 2", len(plan.Decode))
+	}
+	// Check roles
+	for i, cp := range plan.Prefill {
+		if cp.Role != KvRoleProducer {
+			t.Errorf("prefill[%d] Role=%q, want kv_producer", i, cp.Role)
+		}
+		if cp.ReplicaIdx != i {
+			t.Errorf("prefill[%d] ReplicaIdx=%d", i, cp.ReplicaIdx)
+		}
+	}
+	for i, cp := range plan.Decode {
+		if cp.Role != KvRoleConsumer {
+			t.Errorf("decode[%d] Role=%q, want kv_consumer", i, cp.Role)
+		}
+		if cp.ReplicaIdx != i {
+			t.Errorf("decode[%d] ReplicaIdx=%d", i, cp.ReplicaIdx)
+		}
+	}
+	if plan.Prefill[0].Image == "" {
+		t.Errorf("Image empty")
+	}
+	if plan.Prefill[0].ContainerPort == 0 {
+		t.Errorf("ContainerPort == 0")
+	}
+	if plan.Prefill[0].ReadyPath == "" {
+		t.Errorf("ReadyPath empty")
+	}
+	// All replicas must reference the same image
+	for i := range plan.Decode {
+		if plan.Decode[i].Image != plan.Prefill[0].Image {
+			t.Errorf("decode[%d] image mismatch: %q vs %q", i, plan.Decode[i].Image, plan.Prefill[0].Image)
+		}
+	}
+	// Model must appear in the command
+	joined := strings.Join(plan.Prefill[0].Cmd, " ")
+	if !strings.Contains(joined, "meta-llama/Llama-3.1-8B-Instruct") {
+		t.Errorf("cmd missing model: %v", plan.Prefill[0].Cmd)
+	}
+}
+
+func TestBuildPlan_VLLMPrefillDecode_DefaultsReplicas(t *testing.T) {
+	// When PrefillReplicas/DecodeReplicas are 0 (unset), defaults to 1 each.
+	mc, _ := MultiGet("vllm-prefill-decode")
+	plan, err := mc.BuildDeploymentPlan(BuildInput{
+		DeploymentID: "dep-d",
+		ArtifactURI:  "hf://org/m",
+		GPUIndices:   []int{0},
+		HostPort:     1,
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if len(plan.Prefill) != 1 {
+		t.Errorf("expected 1 prefill replica (default), got %d", len(plan.Prefill))
+	}
+	if len(plan.Decode) != 1 {
+		t.Errorf("expected 1 decode replica (default), got %d", len(plan.Decode))
+	}
+}
+
+func TestBuildPlan_VLLMPrefillDecode_RejectsBadInput(t *testing.T) {
+	mc, _ := MultiGet("vllm-prefill-decode")
+	// Missing deployment ID
+	if _, err := mc.BuildDeploymentPlan(BuildInput{
+		ArtifactURI: "hf://org/m",
+		GPUIndices:  []int{0},
+		HostPort:    1,
+	}); err == nil {
+		t.Errorf("expected error for missing DeploymentID")
+	}
+	// No GPU indices (GPU-only)
+	if _, err := mc.BuildDeploymentPlan(BuildInput{
+		DeploymentID: "d",
+		ArtifactURI:  "hf://org/m",
+		GPUIndices:   []int{},
+		HostPort:     1,
+	}); err == nil {
+		t.Errorf("expected error for zero GPU indices")
+	}
+}
+
+func TestContainerPlan_ToPlan(t *testing.T) {
+	cp := ContainerPlan{
+		Image:         "img:tag",
+		Cmd:           []string{"--arg", "val"},
+		Entrypoint:    []string{"/entry.sh"},
+		Env:           map[string]string{"K": "V"},
+		Mounts:        []Mount{{Type: "volume", Source: "src", Target: "/tgt"}},
+		ContainerPort: 8000,
+		GPUIndices:    []int{0},
+		ReadyPath:     "/health",
+		Role:          KvRoleProducer,
+		ReplicaIdx:    0,
+	}
+	p := cp.ToPlan("my-container", 19001)
+	if p.Image != "img:tag" {
+		t.Errorf("Image=%q", p.Image)
+	}
+	if p.ContainerName != "my-container" {
+		t.Errorf("ContainerName=%q", p.ContainerName)
+	}
+	if p.HostPort != 19001 {
+		t.Errorf("HostPort=%d", p.HostPort)
+	}
+	if p.ContainerPort != 8000 {
+		t.Errorf("ContainerPort=%d", p.ContainerPort)
+	}
+	if len(p.Mounts) != 1 {
+		t.Errorf("Mounts count=%d", len(p.Mounts))
+	}
+	if p.ReadyPath != "/health" {
+		t.Errorf("ReadyPath=%q", p.ReadyPath)
+	}
+}
