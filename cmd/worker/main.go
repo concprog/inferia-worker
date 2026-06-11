@@ -182,9 +182,17 @@ func main() {
 	// Control channel dispatcher.
 	gpuName := ""
 	var gpuMemMiB uint64
+	totalGPUs := len(gpus)
 	if len(gpus) > 0 {
 		gpuName = gpus[0].Name
 		gpuMemMiB = gpus[0].MemoryTotalMiB
+	}
+	// When nvidia-smi is unavailable (e.g. distroless) but GPUs exist,
+	// operators can declare the GPU count via override.
+	if v := strings.TrimSpace(os.Getenv("ALLOCATABLE_GPU_OVERRIDE")); v != "" {
+		if n, err := fmt.Sscanf(v, "%d", &totalGPUs); err != nil || n != 1 {
+			totalGPUs = len(gpus) // fall back to telemetry
+		}
 	}
 	disp := dispatcher.NewDispatcher(
 		&runtimeAdapter{r: rt},
@@ -192,6 +200,7 @@ func main() {
 		mc,
 		gpuName,
 		gpuMemMiB,
+		totalGPUs,
 	)
 	disp.Registry = reg
 

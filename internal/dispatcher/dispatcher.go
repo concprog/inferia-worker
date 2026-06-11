@@ -44,18 +44,20 @@ type Dispatcher struct {
 	Metrics   *metrics.Collector
 	GPUName   string
 	GPUMemMiB uint64
+	TotalGPUs int                // total physical GPUs on the host
 	Registry  DeploymentRegistrar // optional; nil = no disagg support
 	Allocator *GPUAllocator       // optional; nil = no GPU tracking
 }
 
-func NewDispatcher(rt Runtime, tel TelemetryReader, mc *metrics.Collector, gpuName string, gpuMem uint64) *Dispatcher {
+func NewDispatcher(rt Runtime, tel TelemetryReader, mc *metrics.Collector, gpuName string, gpuMem uint64, totalGPUs int) *Dispatcher {
 	return &Dispatcher{
 		Rt:        rt,
 		Telemetry: tel,
 		Metrics:   mc,
 		GPUName:   gpuName,
 		GPUMemMiB: gpuMem,
-		Allocator: NewGPUAllocator(),
+		TotalGPUs: totalGPUs,
+		Allocator: NewGPUAllocator(totalGPUs),
 	}
 }
 

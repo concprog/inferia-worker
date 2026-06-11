@@ -279,9 +279,10 @@ func TestProxy_AbortsOnCtxCancel(t *testing.T) {
 // --- Disagg proxy tests ------------------------------------------------------
 
 func TestProxy_DisaggRouting(t *testing.T) {
-	// Phase-1 server (prefill): expects stream=false, max_tokens=1, do_remote_decode=true;
-	// responds with kv_transfer_params.
+	// Phase-1 server (prefill): expects stream=false, max_tokens=1,
+	// kv_transfer_params with do_remote_decode=true, request_id present.
 	pCalled := false
+	var sharedRequestID string
 	pServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pCalled = true
 		body, _ := io.ReadAll(r.Body)
@@ -297,8 +298,27 @@ func TestProxy_DisaggRouting(t *testing.T) {
 		if mt, ok := req["max_tokens"].(float64); !ok || mt != 1 {
 			t.Errorf("prefill: max_tokens=%v, want 1", req["max_tokens"])
 		}
-		if dr, ok := req["do_remote_decode"].(bool); !ok || dr != true {
-			t.Errorf("prefill: do_remote_decode=%v, want true", req["do_remote_decode"])
+		// Must have kv_transfer_params structure (not top-level do_remote_decode)
+		ktp, ok := req["kv_transfer_params"].(map[string]any)
+		if !ok {
+			t.Errorf("prefill: missing kv_transfer_params map")
+		} else {
+			if dr, ok := ktp["do_remote_decode"].(bool); !ok || dr != true {
+				t.Errorf("prefill: kv_transfer_params.do_remote_decode=%v, want true", ktp["do_remote_decode"])
+			}
+			if drp, ok := ktp["do_remote_prefill"].(bool); !ok || drp != false {
+				t.Errorf("prefill: kv_transfer_params.do_remote_prefill=%v, want false", ktp["do_remote_prefill"])
+			}
+		}
+		// Must have request_id in body
+		rid, ok := req["request_id"].(string)
+		if !ok || rid == "" {
+			t.Errorf("prefill: missing or empty request_id")
+		}
+		sharedRequestID = rid
+		// Must have X-Request-Id header matching body
+		if r.Header.Get("X-Request-Id") != rid {
+			t.Errorf("prefill: X-Request-Id header=%q, want %q", r.Header.Get("X-Request-Id"), rid)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -306,7 +326,8 @@ func TestProxy_DisaggRouting(t *testing.T) {
 	}))
 	defer pServer.Close()
 
-	// Phase-2 server (decode): expects original body + kv_transfer_params injected.
+	// Phase-2 server (decode): expects original body + kv_transfer_params injected
+	// and matching request_id.
 	dCalled := false
 	dServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		dCalled = true
@@ -327,6 +348,17 @@ func TestProxy_DisaggRouting(t *testing.T) {
 		// Must have kv_transfer_params from prefill
 		if _, ok := req["kv_transfer_params"]; !ok {
 			t.Errorf("decode: missing kv_transfer_params")
+		}
+		// Must have matching request_id
+		rid, ok := req["request_id"].(string)
+		if !ok || rid == "" {
+			t.Errorf("decode: missing or empty request_id")
+		}
+		if rid != sharedRequestID {
+			t.Errorf("decode: request_id=%q, want %q (same as prefill)", rid, sharedRequestID)
+		}
+		if r.Header.Get("X-Request-Id") != rid {
+			t.Errorf("decode: X-Request-Id header=%q, want %q", r.Header.Get("X-Request-Id"), rid)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

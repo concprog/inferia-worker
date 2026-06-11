@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"github.com/inferia/inferia-worker/internal/metrics"
 )
 
@@ -87,7 +88,7 @@ func NewProxy(cfg Config) fiber.Handler {
 		if cfg.Registry != nil {
 			entry, ok := cfg.Registry.LookupByID(deploymentID)
 			if ok && entry.Mode == ModeDisagg {
-				return handleDisagg(c, entry)
+				return handleDisagg(c, entry, cfg)
 			}
 		}
 
@@ -167,14 +168,22 @@ func NewProxy(cfg Config) fiber.Handler {
 }
 
 // handleDisagg performs two-phase P→D routing for disagg deployments.
-// Phase 1: send modified body to P (stream=false, max_tokens=1, do_remote_decode=true).
-// Phase 2: extract kv_transfer_params from P response, inject into original
-// body, send to D, and stream the response to the caller.
-func handleDisagg(c *fiber.Ctx, entry *DeploymentEntry) error {
+// Phase 1: send modified body to P (stream=false, max_tokens=1, kv_transfer_params
+// with do_remote_decode=true). Phase 2: extract kv_transfer_params from P
+// response, inject into original body, send to D, and stream the response.
+func handleDisagg(c *fiber.Ctx, entry *DeploymentEntry, cfg Config) error {
 	body := c.Body()
+	requestID := newRequestID()
+
+	// Activate metrics for this deployment.
+	if cfg.Metrics != nil {
+		cfg.Metrics.IncActive(entry.Group.ID)
+		defer cfg.Metrics.DecActive(entry.Group.ID)
+	}
+	start := time.Now()
 
 	// --- Phase 1: Prefill ---
-	prefillBody, err := buildPrefillBody(body)
+	prefillBody, err := buildPrefillBody(body, requestID)
 	if err != nil {
 		return c.Status(fiber.StatusBadGateway).SendString("prefill build: " + err.Error())
 	}
@@ -192,25 +201,34 @@ func handleDisagg(c *fiber.Ctx, entry *DeploymentEntry) error {
 		}
 		prefillReq.Header.Add(string(k), string(v))
 	})
+	prefillReq.Header.Set("X-Request-Id", requestID)
 	prefillResp, err := httpClient.Do(prefillReq)
 	if err != nil {
 		return c.Status(fiber.StatusBadGateway).SendString("prefill: " + err.Error())
 	}
 	defer prefillResp.Body.Close()
 	if prefillResp.StatusCode != http.StatusOK {
-		return c.Status(fiber.StatusBadGateway).SendString("prefill: upstream error")
+		errBody, _ := io.ReadAll(prefillResp.Body)
+		msg := "prefill: upstream error"
+		if len(errBody) > 0 {
+			msg += ": " + string(errBody)
+		}
+		return c.Status(fiber.StatusBadGateway).SendString(msg)
 	}
 	var prefillResult map[string]any
 	if err := json.NewDecoder(prefillResp.Body).Decode(&prefillResult); err != nil {
-		return c.Status(fiber.StatusBadGateway).SendString("prefill decode: "+err.Error())
+		return c.Status(fiber.StatusBadGateway).SendString("prefill decode: " + err.Error())
 	}
 	kvParams, ok := prefillResult["kv_transfer_params"]
-	if !ok {
+	if !ok || kvParams == nil {
 		return c.Status(fiber.StatusBadGateway).SendString("prefill: missing kv_transfer_params")
+	}
+	if m, isMap := kvParams.(map[string]any); isMap && len(m) == 0 {
+		return c.Status(fiber.StatusBadGateway).SendString("prefill: empty kv_transfer_params")
 	}
 
 	// --- Phase 2: Decode ---
-	decodeBody, err := buildDecodeBody(body, kvParams)
+	decodeBody, err := buildDecodeBody(body, kvParams, requestID)
 	if err != nil {
 		return c.Status(fiber.StatusBadGateway).SendString("decode build: " + err.Error())
 	}
@@ -228,9 +246,18 @@ func handleDisagg(c *fiber.Ctx, entry *DeploymentEntry) error {
 		}
 		decodeReq.Header.Add(string(k), string(v))
 	})
+	decodeReq.Header.Set("X-Request-Id", requestID)
 	decodeResp, err := httpClient.Do(decodeReq)
 	if err != nil {
 		return c.Status(fiber.StatusBadGateway).SendString("decode: " + err.Error())
+	}
+
+	latency := time.Since(start)
+	if cfg.Metrics != nil && cfg.Runtime != nil {
+		id := entry.Group.ID
+		if recipe, model, _, _, _, ok := cfg.Runtime.DeploymentInfo(id); ok {
+			cfg.Metrics.RecordRequest(id, recipe, model, latency.Milliseconds())
+		}
 	}
 
 	// Stream decode response to client.
@@ -247,9 +274,21 @@ func handleDisagg(c *fiber.Ctx, entry *DeploymentEntry) error {
 	return nil
 }
 
-// buildPrefillBody clones the original request JSON and sets stream=false,
-// max_tokens=1, do_remote_decode=true for the prefill phase.
-func buildPrefillBody(original []byte) ([]byte, error) {
+// kvTransferParamsPrefill is the kv_transfer_params structure sent to the
+// prefill instance to request a remote-decode KV cache entry.
+var kvTransferParamsPrefill = map[string]any{
+	"do_remote_decode": true,
+	"do_remote_prefill": false,
+	"remote_engine_id":  nil,
+	"remote_block_ids":  nil,
+	"remote_host":       nil,
+	"remote_port":       nil,
+}
+
+// buildPrefillBody clones the original request JSON and modifies it for the
+// prefill phase: stream=false, max_tokens=1, kv_transfer_params with
+// do_remote_decode=true, stream_options/min_tokens/etc deleted.
+func buildPrefillBody(original []byte, requestID string) ([]byte, error) {
 	if len(original) == 0 {
 		return original, nil
 	}
@@ -257,15 +296,24 @@ func buildPrefillBody(original []byte) ([]byte, error) {
 	if err := json.Unmarshal(original, &body); err != nil {
 		return nil, err
 	}
+	body["request_id"] = requestID
+	body["kv_transfer_params"] = kvTransferParamsPrefill
 	body["stream"] = false
 	body["max_tokens"] = 1.0
-	body["do_remote_decode"] = true
+	if _, has := body["max_completion_tokens"]; has {
+		body["max_completion_tokens"] = 1
+	}
+	delete(body, "stream_options")
+	delete(body, "min_tokens")
+	delete(body, "min_completion_tokens")
 	return json.Marshal(body)
 }
 
 // buildDecodeBody clones the original request JSON and injects
 // kv_transfer_params from the prefill phase for the decode phase.
-func buildDecodeBody(original []byte, kvParams any) ([]byte, error) {
+// It also injects the shared request_id and restores min_tokens that
+// were removed from the prefill body.
+func buildDecodeBody(original []byte, kvParams any, requestID string) ([]byte, error) {
 	if len(original) == 0 {
 		return original, nil
 	}
@@ -273,8 +321,14 @@ func buildDecodeBody(original []byte, kvParams any) ([]byte, error) {
 	if err := json.Unmarshal(original, &body); err != nil {
 		return nil, err
 	}
+	body["request_id"] = requestID
 	body["kv_transfer_params"] = kvParams
 	return json.Marshal(body)
+}
+
+// newRequestID generates a unique UUID string for correlating P→D phases.
+var newRequestID = func() string {
+	return uuid.New().String()
 }
 
 // streamReader forwards reads from the upstream body. fasthttp will call
