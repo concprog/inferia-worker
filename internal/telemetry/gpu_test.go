@@ -21,8 +21,9 @@ func devsErroring(msg string) devLister {
 // parseNvidiaSMI tests ---------------------------------------------------
 
 func TestParseNvidiaSMI_Normal(t *testing.T) {
-	out := "NVIDIA A100-SXM4-80GB, 81920, 12345\n" +
-		"NVIDIA A100-SXM4-80GB, 81920, 9876\n"
+	// New query order: name, memory.total, memory.used, utilization.gpu
+	out := "NVIDIA A100-SXM4-80GB, 81920, 12345, 55\n" +
+		"NVIDIA A100-SXM4-80GB, 81920, 9876, 0\n"
 	gpus, err := parseNvidiaSMI(out)
 	if err != nil {
 		t.Fatalf("%v", err)
@@ -35,6 +36,9 @@ func TestParseNvidiaSMI_Normal(t *testing.T) {
 	}
 	if gpus[0].MemoryTotalMiB != 81920 || gpus[0].MemoryUsedMiB != 12345 {
 		t.Errorf("mem: %+v", gpus[0])
+	}
+	if gpus[0].UtilPct != 55 {
+		t.Errorf("util: %v", gpus[0].UtilPct)
 	}
 }
 
@@ -59,6 +63,7 @@ func TestParseNvidiaSMI_WhitespaceOnly(t *testing.T) {
 }
 
 func TestParseNvidiaSMI_PartialLineRejected(t *testing.T) {
+	// Fewer than 4 fields → skipped (need name + total + used + util).
 	out := "NVIDIA A100, 81920\n"
 	gpus, _ := parseNvidiaSMI(out)
 	if len(gpus) != 0 {
@@ -67,9 +72,10 @@ func TestParseNvidiaSMI_PartialLineRejected(t *testing.T) {
 }
 
 func TestParseNvidiaSMI_NonNumericMiB(t *testing.T) {
-	out := "NVIDIA A100, 81920, 12345\n" +
-		"NVIDIA A100, NA, NA\n" +
-		"NVIDIA A100, 81920, 6789\n"
+	// Bad total/used → skip that line; util parse failure → 0 (keep line).
+	out := "NVIDIA A100, 81920, 12345, 42\n" +
+		"NVIDIA A100, NA, NA, 0\n" +
+		"NVIDIA A100, 81920, 6789, 10\n"
 	gpus, _ := parseNvidiaSMI(out)
 	if len(gpus) != 2 {
 		t.Errorf("got %d good gpus", len(gpus))
@@ -77,7 +83,8 @@ func TestParseNvidiaSMI_NonNumericMiB(t *testing.T) {
 }
 
 func TestParseNvidiaSMI_NameWithComma(t *testing.T) {
-	out := "NVIDIA RTX, A6000, 49152, 1000\n"
+	// 5 CSV fields: name has an embedded comma → last 3 are total/used/util.
+	out := "NVIDIA RTX, A6000, 49152, 1000, 75\n"
 	gpus, _ := parseNvidiaSMI(out)
 	if len(gpus) != 1 {
 		t.Fatalf("got %d gpus", len(gpus))
@@ -87,6 +94,37 @@ func TestParseNvidiaSMI_NameWithComma(t *testing.T) {
 	}
 	if gpus[0].MemoryTotalMiB != 49152 || gpus[0].MemoryUsedMiB != 1000 {
 		t.Errorf("mem: %+v", gpus[0])
+	}
+	if gpus[0].UtilPct != 75 {
+		t.Errorf("util: %v", gpus[0].UtilPct)
+	}
+}
+
+func TestParseNvidiaSMI_NameWithCommas(t *testing.T) {
+	out := "NVIDIA RTX, A6000, 49140, 1024, 33\n"
+	gpus, err := parseNvidiaSMI(out)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if len(gpus) != 1 || gpus[0].Name != "NVIDIA RTX, A6000" {
+		t.Fatalf("name parse with embedded comma failed: %+v", gpus)
+	}
+	if gpus[0].MemoryTotalMiB != 49140 || gpus[0].MemoryUsedMiB != 1024 || gpus[0].UtilPct != 33 {
+		t.Fatalf("values: %+v", gpus[0])
+	}
+}
+
+func TestParseNvidiaSMI_UnparseableUtilDefaultsZero(t *testing.T) {
+	out := "NVIDIA A100, 81920, 12345, [N/A]\n"
+	gpus, err := parseNvidiaSMI(out)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if len(gpus) != 1 || gpus[0].UtilPct != 0 {
+		t.Fatalf("util should default 0 on unparseable: %+v", gpus)
+	}
+	if gpus[0].MemoryTotalMiB != 81920 {
+		t.Fatalf("mem should still parse: %+v", gpus[0])
 	}
 }
 
@@ -105,8 +143,9 @@ func TestReadGPU_RunnerErrorTriesDevFallback(t *testing.T) {
 }
 
 func TestReadGPU_NvidiaSMISuccess(t *testing.T) {
+	// 4-column fixture: name, total, used, util.
 	runner := func() (string, error) {
-		return "NVIDIA A100, 81920, 100\n", nil
+		return "NVIDIA A100, 81920, 100, 72\n", nil
 	}
 	gpus, err := readGPUFrom(runner, emptyDevs)
 	if err != nil || len(gpus) != 1 {
@@ -118,6 +157,9 @@ func TestReadGPU_NvidiaSMISuccess(t *testing.T) {
 	}
 	if gpus[0].MemoryTotalMiB != 81920 {
 		t.Errorf("expected memory from nvidia-smi, got %d", gpus[0].MemoryTotalMiB)
+	}
+	if gpus[0].UtilPct != 72 {
+		t.Errorf("expected util from nvidia-smi, got %v", gpus[0].UtilPct)
 	}
 }
 
@@ -136,6 +178,10 @@ func TestReadGPU_FallsBackToDevWhenNvidiaSMIMissing(t *testing.T) {
 	}
 	if gpus[0].MemoryTotalMiB != 0 || gpus[0].MemoryUsedMiB != 0 {
 		t.Errorf("fallback should report zero memory (can't query without driver), got %+v", gpus[0])
+	}
+	// UtilPct must also be zero for /dev fallback (no driver to query).
+	if gpus[0].UtilPct != 0 {
+		t.Errorf("fallback should report zero util, got %v", gpus[0].UtilPct)
 	}
 }
 

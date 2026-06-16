@@ -51,9 +51,11 @@ type LoadResult struct {
 	EndpointURL string
 }
 
-// TelemetryReader returns one snapshot of host CPU/memory/GPU usage.
+// TelemetryReader returns one snapshot of host usage: the legacy opaque
+// `used` map (consumed by inventory) plus an optional structured metrics
+// sample for the dashboard Metrics tab.
 type TelemetryReader interface {
-	Read() (used map[string]string)
+	Read() (used map[string]string, metrics *control.MetricsSample)
 }
 
 // LoadModel converts the WS body into a recipes.Plan and asks the runtime to
@@ -104,8 +106,9 @@ func (d *Dispatcher) UnloadModel(ctx context.Context, body control.UnloadModelBo
 
 func (d *Dispatcher) HeartbeatSnapshot() control.HeartbeatBody {
 	var used map[string]string
+	var sample *control.MetricsSample
 	if d.Telemetry != nil {
-		used = d.Telemetry.Read()
+		used, sample = d.Telemetry.Read()
 	} else {
 		used = map[string]string{}
 	}
@@ -114,6 +117,7 @@ func (d *Dispatcher) HeartbeatSnapshot() control.HeartbeatBody {
 	body := control.HeartbeatBody{
 		Used:         used,
 		LoadedModels: models,
+		Metrics:      sample,
 	}
 
 	if d.Metrics != nil {

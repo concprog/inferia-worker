@@ -56,9 +56,14 @@ func (f *fakeRT) DeploymentInfo(deploymentID string) (recipe, model, phase strin
 
 func (f *fakeRT) EndpointURL(deploymentID string) string { return f.loaded[deploymentID] }
 
-type fakeTelemetry struct{ data map[string]string }
+type fakeTelemetry struct {
+	data    map[string]string
+	metrics *control.MetricsSample
+}
 
-func (f *fakeTelemetry) Read() map[string]string { return f.data }
+func (f *fakeTelemetry) Read() (map[string]string, *control.MetricsSample) {
+	return f.data, f.metrics
+}
 
 func TestLoadModel_HappyPath(t *testing.T) {
 	rt := newFakeRT()
@@ -456,4 +461,24 @@ vllm:avg_generation_throughput_toks_per_sec 58.3`
 
 	t.Log("")
 	t.Log("=== ALL VERIFIED: metrics pipeline end-to-end ==")
+}
+
+func TestHeartbeatSnapshot_IncludesMetrics(t *testing.T) {
+	d := &Dispatcher{
+		Rt: newFakeRT(),
+		Telemetry: &fakeTelemetry{
+			data:    map[string]string{"cpu_pct": "12.50"},
+			metrics: &control.MetricsSample{CPUPct: 12.5, GPUs: []control.GPUSample{{Index: 0, UtilPct: 40}}},
+		},
+	}
+	hb := d.HeartbeatSnapshot()
+	if hb.Metrics == nil || hb.Metrics.CPUPct != 12.5 {
+		t.Fatalf("metrics not forwarded: %+v", hb.Metrics)
+	}
+	if len(hb.Metrics.GPUs) != 1 || hb.Metrics.GPUs[0].UtilPct != 40 {
+		t.Fatalf("gpu sample not forwarded: %+v", hb.Metrics)
+	}
+	if hb.Used["cpu_pct"] != "12.50" {
+		t.Fatalf("used map dropped: %+v", hb.Used)
+	}
 }

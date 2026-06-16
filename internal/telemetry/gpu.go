@@ -13,6 +13,7 @@ type GPUInfo struct {
 	Name           string
 	MemoryTotalMiB uint64
 	MemoryUsedMiB  uint64
+	UtilPct        float64 // 0..100; 0 when nvidia-smi unavailable or unparseable
 }
 
 // commandRunner returns combined stdout of nvidia-smi.
@@ -26,7 +27,7 @@ type devLister func() ([]string, error)
 func defaultNvidiaSMI() (string, error) {
 	out, err := exec.Command(
 		"nvidia-smi",
-		"--query-gpu=name,memory.total,memory.used",
+		"--query-gpu=name,memory.total,memory.used,utilization.gpu",
 		"--format=csv,noheader,nounits",
 	).Output()
 	if err != nil {
@@ -105,9 +106,13 @@ func readGPUFromDevices(listDev devLister) []GPUInfo {
 	return gpus
 }
 
-// parseNvidiaSMI parses CSV output. Some driver versions emit names with
-// embedded commas, so we always interpret the last two CSV fields as
-// memory.total and memory.used, and rejoin everything else as the name.
+// parseNvidiaSMI parses CSV output from nvidia-smi queried with
+// --query-gpu=name,memory.total,memory.used,utilization.gpu.
+// Some driver versions emit names with embedded commas, so we always
+// interpret the last THREE CSV fields as memory.total, memory.used, and
+// utilization.gpu, and rejoin everything before as the name.
+// If utilization.gpu is unparseable (e.g. "[N/A]"), UtilPct defaults to 0
+// and the GPU is still included.
 func parseNvidiaSMI(s string) ([]GPUInfo, error) {
 	var gpus []GPUInfo
 	for _, line := range strings.Split(s, "\n") {
@@ -116,13 +121,13 @@ func parseNvidiaSMI(s string) ([]GPUInfo, error) {
 			continue
 		}
 		parts := strings.Split(line, ",")
-		if len(parts) < 3 {
+		if len(parts) < 4 {
 			continue
 		}
-		// Take the last two fields as memory values; everything before is the name.
-		usedRaw := strings.TrimSpace(parts[len(parts)-1])
-		totalRaw := strings.TrimSpace(parts[len(parts)-2])
-		nameParts := parts[:len(parts)-2]
+		utilRaw := strings.TrimSpace(parts[len(parts)-1])
+		usedRaw := strings.TrimSpace(parts[len(parts)-2])
+		totalRaw := strings.TrimSpace(parts[len(parts)-3])
+		nameParts := parts[:len(parts)-3]
 		for i, p := range nameParts {
 			nameParts[i] = strings.TrimSpace(p)
 		}
@@ -136,10 +141,15 @@ func parseNvidiaSMI(s string) ([]GPUInfo, error) {
 		if err != nil {
 			continue
 		}
+		util, uerr := strconv.ParseFloat(utilRaw, 64)
+		if uerr != nil {
+			util = 0
+		}
 		gpus = append(gpus, GPUInfo{
 			Name:           name,
 			MemoryTotalMiB: total,
 			MemoryUsedMiB:  used,
+			UtilPct:        util,
 		})
 	}
 	return gpus, nil

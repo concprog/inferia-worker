@@ -19,7 +19,8 @@ func TestToWS(t *testing.T) {
 }
 
 func TestHostTelemetry_NeverErrors(t *testing.T) {
-	used := (hostTelemetry{}).Read()
+	h := &hostTelemetry{}
+	used, sample := h.Read()
 	if used == nil {
 		t.Errorf("expected non-nil map")
 	}
@@ -29,5 +30,20 @@ func TestHostTelemetry_NeverErrors(t *testing.T) {
 		if _, ok := used[k]; !ok {
 			t.Errorf("missing key %q in %v", k, used)
 		}
+	}
+	if sample == nil {
+		t.Fatal("first sample should be non-nil")
+	}
+
+	// Second read exercises the haveBase==true rate-derivation branch:
+	// network and disk byte counters have a baseline now, so DeriveRate is
+	// called and the result must be non-negative.
+	_, sample2 := h.Read()
+	if sample2 == nil {
+		t.Fatal("second sample should be non-nil")
+	}
+	if sample2.NetRxBps < 0 || sample2.NetTxBps < 0 ||
+		sample2.DiskReadBps < 0 || sample2.DiskWriteBps < 0 {
+		t.Errorf("derived rates must be non-negative: %+v", sample2)
 	}
 }
