@@ -95,8 +95,10 @@ func TestGPUOptimalConfig_T4(t *testing.T) {
 	if env["VLLM_ATTENTION_BACKEND"] != "XFORMERS" {
 		t.Errorf("VLLM_ATTENTION_BACKEND = %q, want XFORMERS", env["VLLM_ATTENTION_BACKEND"])
 	}
-	if env["VLLM_USE_FASTOKENS"] != "1" {
-		t.Errorf("VLLM_USE_FASTOKENS missing")
+	// VLLM_USE_FASTOKENS must NOT be set: the shipped vllm-openai image lacks
+	// the fastokens package, so setting it crashes vLLM at engine init.
+	if _, ok := env["VLLM_USE_FASTOKENS"]; ok {
+		t.Errorf("VLLM_USE_FASTOKENS must not be set (image has no fastokens)")
 	}
 	checkNotSet(t, cfg, "tensor_parallel_size")
 }
@@ -226,8 +228,8 @@ func TestGPUOptimalConfig_UnknownGPU(t *testing.T) {
 		{"max_num_batched_tokens", 8192},
 		{"enable_prefix_caching", true},
 	})
-	if env["VLLM_USE_FASTOKENS"] != "1" {
-		t.Errorf("VLLM_USE_FASTOKENS missing")
+	if _, ok := env["VLLM_USE_FASTOKENS"]; ok {
+		t.Errorf("VLLM_USE_FASTOKENS must not be set (image has no fastokens)")
 	}
 }
 
@@ -242,8 +244,8 @@ func TestGPUOptimalConfig_EmptyName(t *testing.T) {
 		{"enable_prefix_caching", true},
 	})
 	checkNotSet(t, cfg, "dtype", "kv_cache_dtype", "quantization", "tensor_parallel_size")
-	if env["VLLM_USE_FASTOKENS"] != "1" {
-		t.Errorf("VLLM_USE_FASTOKENS missing")
+	if _, ok := env["VLLM_USE_FASTOKENS"]; ok {
+		t.Errorf("VLLM_USE_FASTOKENS must not be set (image has no fastokens)")
 	}
 }
 
