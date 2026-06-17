@@ -107,9 +107,14 @@ func (r *fakeRegistrar) Deregister(id string) {
 	delete(r.registered, id)
 }
 
-type fakeTelemetry struct{ data map[string]string }
+type fakeTelemetry struct {
+	data    map[string]string
+	metrics *control.MetricsSample
+}
 
-func (f *fakeTelemetry) Read() map[string]string { return f.data }
+func (f *fakeTelemetry) Read() (map[string]string, *control.MetricsSample) {
+	return f.data, f.metrics
+}
 
 func TestLoadModel_HappyPath(t *testing.T) {
 	rt := newFakeRT()
@@ -573,8 +578,6 @@ func TestLoadModel_DisaggPathDefaultsReplicas(t *testing.T) {
 }
 
 func TestLoadModel_DisaggWithPrefillReplicasZero_FallsThroughToSingle(t *testing.T) {
-	// When PrefillReplicas is 0 (not set by old CPs), the dispatcher must
-	// NOT take the disagg path — falls through to the normal path.
 	rt := newFakeRT()
 	d := &Dispatcher{Rt: rt}
 
@@ -584,7 +587,6 @@ func TestLoadModel_DisaggWithPrefillReplicasZero_FallsThroughToSingle(t *testing
 		Model:        control.ModelRef{ArtifactURI: "hf://o/m"},
 		GPUIndices:   []int{0},
 		Port:         1234,
-		// PrefillReplicas is 0 (zero value) — no disagg path
 	})
 	if err != nil {
 		t.Fatalf("%v", err)
@@ -599,7 +601,6 @@ func TestLoadModel_DisaggWithPrefillReplicasZero_FallsThroughToSingle(t *testing
 
 func TestLoadModel_DisaggRegistryNotSet_NoPanic(t *testing.T) {
 	rt := newFakeRT()
-	// Registry is nil — must not panic
 	d := &Dispatcher{Rt: rt}
 
 	_, err := d.LoadModel(context.Background(), control.LoadModelBody{
@@ -628,11 +629,30 @@ func TestUnloadModel_DisaggPath(t *testing.T) {
 	if err := d.UnloadModel(context.Background(), control.UnloadModelBody{DeploymentID: "dep-disagg-1"}); err != nil {
 		t.Fatalf("UnloadModel: %v", err)
 	}
-	// Must have deregistered and unloaded the group
 	if len(reg.deregistered) != 1 || reg.deregistered[0] != "dep-disagg-1" {
 		t.Errorf("deregister not called correctly: %v", reg.deregistered)
 	}
 	if len(rt.groupUnloaded) != 1 || rt.groupUnloaded[0] != "dep-disagg-1" {
 		t.Errorf("group not unloaded: %v", rt.groupUnloaded)
+	}
+}
+
+func TestHeartbeatSnapshot_IncludesMetrics(t *testing.T) {
+	d := &Dispatcher{
+		Rt: newFakeRT(),
+		Telemetry: &fakeTelemetry{
+			data:    map[string]string{"cpu_pct": "12.50"},
+			metrics: &control.MetricsSample{CPUPct: 12.5, GPUs: []control.GPUSample{{Index: 0, UtilPct: 40}}},
+		},
+	}
+	hb := d.HeartbeatSnapshot()
+	if hb.Metrics == nil || hb.Metrics.CPUPct != 12.5 {
+		t.Fatalf("metrics not forwarded: %+v", hb.Metrics)
+	}
+	if len(hb.Metrics.GPUs) != 1 || hb.Metrics.GPUs[0].UtilPct != 40 {
+		t.Fatalf("gpu sample not forwarded: %+v", hb.Metrics)
+	}
+	if hb.Used["cpu_pct"] != "12.50" {
+		t.Fatalf("used map dropped: %+v", hb.Used)
 	}
 }

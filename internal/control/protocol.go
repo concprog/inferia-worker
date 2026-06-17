@@ -76,10 +76,11 @@ type HelloBody struct {
 // HeartbeatBody is what the worker sends every interval. used is a map of
 // resource → opaque string (matches Python compute_node.proto for migration).
 type HeartbeatBody struct {
-	Used          map[string]string `json:"used"`
-	LoadedModels  []string          `json:"loaded_models"`
-	Events        []HeartbeatEvent  `json:"events,omitempty"`
+	Used          map[string]string  `json:"used"`
+	LoadedModels  []string           `json:"loaded_models"`
+	Events        []HeartbeatEvent   `json:"events,omitempty"`
 	DeployMetrics []DeploymentMetric `json:"deploy_metrics,omitempty"`
+	Metrics       *MetricsSample     `json:"metrics,omitempty"`
 }
 
 // DeploymentMetric carries performance and lifecycle stats for a single model deployment.
@@ -105,6 +106,30 @@ type HeartbeatEvent struct {
 	DeploymentID string `json:"deployment_id"`
 	ExitCode     int    `json:"exit_code,omitempty"`
 	Reason       string `json:"reason,omitempty"`
+}
+
+// GPUSample is one GPU's live utilization in a metrics heartbeat.
+type GPUSample struct {
+	Index       int     `json:"index"`
+	Name        string  `json:"name"`
+	UtilPct     float64 `json:"util_pct"`
+	MemUsedMiB  uint64  `json:"mem_used_mib"`
+	MemTotalMiB uint64  `json:"mem_total_mib"`
+}
+
+// MetricsSample is one structured telemetry snapshot piggybacked on the
+// heartbeat. Optional — older control planes ignore it; newer ones append it
+// to a per-node ring buffer for the dashboard Metrics tab.
+type MetricsSample struct {
+	TS            string      `json:"ts"` // RFC3339Nano
+	CPUPct        float64     `json:"cpu_pct"`
+	MemUsedBytes  uint64      `json:"mem_used_bytes"`
+	MemTotalBytes uint64      `json:"mem_total_bytes"`
+	NetRxBps      float64     `json:"net_rx_bps"`
+	NetTxBps      float64     `json:"net_tx_bps"`
+	DiskReadBps   float64     `json:"disk_read_bps"`
+	DiskWriteBps  float64     `json:"disk_write_bps"`
+	GPUs          []GPUSample `json:"gpus"`
 }
 
 // LoadModelBody is the command from CP to worker.

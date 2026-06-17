@@ -196,7 +196,7 @@ func main() {
 	}
 	disp := dispatcher.NewDispatcher(
 		&runtimeAdapter{r: rt},
-		hostTelemetry{},
+		&hostTelemetry{},
 		mc,
 		gpuName,
 		gpuMemMiB,
@@ -280,18 +280,67 @@ func (a *runtimeAdapter) UnloadDeploymentGroup(ctx context.Context, id string) e
 	return a.r.UnloadDeploymentGroup(ctx, id)
 }
 
-// hostTelemetry reads CPU/memory/GPU from the host.
-type hostTelemetry struct{}
+// hostTelemetry reads CPU/memory/GPU/net/disk from the host. It is stateful:
+// network and disk are cumulative counters, so it remembers the previous
+// sample to derive per-second rates on each heartbeat.
+type hostTelemetry struct {
+	mu       sync.Mutex
+	prevNet  telemetry.NetCounters
+	prevDisk telemetry.DiskCounters
+	prevTS   time.Time
+	haveBase bool
+}
 
-func (hostTelemetry) Read() map[string]string {
+func (h *hostTelemetry) Read() (map[string]string, *control.MetricsSample) {
 	cpu, _ := telemetry.ReadCPU()
 	mem, _ := telemetry.ReadMemory()
 	gpus, _ := telemetry.ReadGPU()
-	return map[string]string{
+
+	used := map[string]string{
 		"cpu_pct":  fmt.Sprintf("%.2f", cpu.UsedPercent),
 		"mem_used": fmt.Sprintf("%d", mem.Used),
 		"gpu":      fmt.Sprintf("%d", len(gpus)),
 	}
+
+	netc, _ := telemetry.ReadNet()
+	diskc, _ := telemetry.ReadDisk()
+	now := time.Now()
+
+	h.mu.Lock()
+	var netRx, netTx, dRead, dWrite float64
+	if h.haveBase {
+		dt := now.Sub(h.prevTS).Seconds()
+		netRx = telemetry.DeriveRate(netc.RxBytes, h.prevNet.RxBytes, dt)
+		netTx = telemetry.DeriveRate(netc.TxBytes, h.prevNet.TxBytes, dt)
+		dRead = telemetry.DeriveRate(diskc.ReadBytes, h.prevDisk.ReadBytes, dt)
+		dWrite = telemetry.DeriveRate(diskc.WriteBytes, h.prevDisk.WriteBytes, dt)
+	}
+	h.prevNet, h.prevDisk, h.prevTS, h.haveBase = netc, diskc, now, true
+	h.mu.Unlock()
+
+	gpuSamples := make([]control.GPUSample, 0, len(gpus))
+	for i, g := range gpus {
+		gpuSamples = append(gpuSamples, control.GPUSample{
+			Index:       i,
+			Name:        g.Name,
+			UtilPct:     g.UtilPct,
+			MemUsedMiB:  g.MemoryUsedMiB,
+			MemTotalMiB: g.MemoryTotalMiB,
+		})
+	}
+
+	sample := &control.MetricsSample{
+		TS:            now.UTC().Format(time.RFC3339Nano),
+		CPUPct:        cpu.UsedPercent,
+		MemUsedBytes:  mem.Used,
+		MemTotalBytes: mem.Total,
+		NetRxBps:      netRx,
+		NetTxBps:      netTx,
+		DiskReadBps:   dRead,
+		DiskWriteBps:  dWrite,
+		GPUs:          gpuSamples,
+	}
+	return used, sample
 }
 
 // toWS rewrites http(s):// to ws(s):// preserving the rest of the URL.
