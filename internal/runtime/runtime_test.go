@@ -122,6 +122,62 @@ func TestLoadModel_ReadinessTimeoutCleansUp(t *testing.T) {
 	}
 }
 
+// A prior attempt can leave a container occupying the deployment's fixed name
+// (e.g. a control-plane restart cancelled the request ctx mid-load so cleanup
+// was skipped). load_model must clear it first and succeed, instead of failing
+// forever with "container name already in use" and a stuck-DEPLOYING deploy.
+func TestLoadModel_ClearsStaleSameNameContainer(t *testing.T) {
+	fc := fake.New()
+	rt := newRT(t, fc, okProbe)
+	ctx := context.Background()
+
+	plan := samplePlan("dep-1")
+	// Seed the orphaned leftover container under the deployment's name.
+	if _, err := fc.Create(ctx, &dockerclient.ContainerSpec{Name: plan.ContainerName}); err != nil {
+		t.Fatalf("seed stale container: %v", err)
+	}
+
+	// Without remove-before-create this fails: "container name already in use".
+	res, err := rt.LoadModel(ctx, "dep-1", plan)
+	if err != nil {
+		t.Fatalf("LoadModel must succeed after clearing the stale container: %v", err)
+	}
+	if res.EndpointURL == "" {
+		t.Fatalf("expected an endpoint URL")
+	}
+	if !contains(fc.RemovedByName, plan.ContainerName) {
+		t.Errorf("expected RemoveByName(%q), got %v", plan.ContainerName, fc.RemovedByName)
+	}
+	if rt.StatusOf("dep-1") != StateRunning {
+		t.Errorf("expected running, got %v", rt.StatusOf("dep-1"))
+	}
+}
+
+// When the request ctx is cancelled mid-load (control-plane channel dropped),
+// the failure-path cleanup must still remove the just-created container via a
+// fresh ctx (cleanupCtx). Otherwise the container leaks, its name is taken, and
+// every subsequent re-drive conflicts — the original stuck-DEPLOYING bug.
+func TestLoadModel_CleanupSurvivesCancelledRequestCtx(t *testing.T) {
+	fc := fake.New()
+	fc.StartErr = errors.New("docker start boom") // fail AFTER create
+	rt := newRT(t, fc, okProbe)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // request ctx already dead
+
+	plan := samplePlan("dep-1")
+	if _, err := rt.LoadModel(ctx, "dep-1", plan); err == nil {
+		t.Fatalf("expected a start failure")
+	}
+	if len(fc.Removed) != 1 {
+		t.Fatalf("container not cleaned up on cancelled ctx (name would leak); Removed=%v", fc.Removed)
+	}
+	// Name freed → recreating with the same name must not conflict.
+	if _, err := fc.Create(context.Background(), &dockerclient.ContainerSpec{Name: plan.ContainerName}); err != nil {
+		t.Errorf("name should be free after cleanup, got %v", err)
+	}
+}
+
 func TestUnloadModel_StopsAndRemoves(t *testing.T) {
 	fc := fake.New()
 	rt := newRT(t, fc, okProbe)
