@@ -6,6 +6,7 @@ package fake
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/inferia/inferia-worker/internal/runtime/dockerclient"
@@ -24,10 +25,16 @@ type Client struct {
 	Started         []string
 	Stopped         []string
 	Removed         []string
+	RemovedByName   []string
 
 	// containers maps containerID → inspect state, mutated by Start/Stop/Remove
 	// and read by Inspect.
 	containers map[string]*dockerclient.Inspect
+
+	// names maps a container's name → its synthesised ID, so the fake can model
+	// Docker's "container name already in use" conflict and resolve
+	// RemoveByName. Empty names are not tracked.
+	names map[string]string
 
 	// next ID counter for synthesised containerIDs.
 	nextID int
@@ -40,6 +47,7 @@ type Client struct {
 	StartErr         error
 	StopErr          error
 	RemoveErr        error
+	RemoveByNameErr  error
 	InspectErr       error
 	LogsErr          error
 
@@ -48,7 +56,12 @@ type Client struct {
 }
 
 // New returns an empty fake.
-func New() *Client { return &Client{containers: map[string]*dockerclient.Inspect{}} }
+func New() *Client {
+	return &Client{
+		containers: map[string]*dockerclient.Inspect{},
+		names:      map[string]string{},
+	}
+}
 
 func (c *Client) Ping(ctx context.Context) error {
 	c.mu.Lock()
@@ -92,10 +105,21 @@ func (c *Client) Create(ctx context.Context, spec *dockerclient.ContainerSpec) (
 	if c.CreateErr != nil {
 		return "", c.CreateErr
 	}
+	// Model Docker's name-conflict: a non-empty name already in use cannot be
+	// reused until the prior container is removed.
+	if spec.Name != "" {
+		if _, exists := c.names[spec.Name]; exists {
+			return "", fmt.Errorf(
+				"Error response from daemon: Conflict. The container name %q is already in use", "/"+spec.Name)
+		}
+	}
 	c.nextID++
 	id := "fake-id-" + spec.Name
 	c.Created = append(c.Created, spec)
 	c.containers[id] = &dockerclient.Inspect{ID: id, Running: false, Status: "created"}
+	if spec.Name != "" {
+		c.names[spec.Name] = id
+	}
 	return id, nil
 }
 
@@ -119,6 +143,12 @@ func (c *Client) Stop(ctx context.Context, id string, timeoutSeconds int) error 
 	if c.StopErr != nil {
 		return c.StopErr
 	}
+	// Mirror the real Docker client: a cancelled context fails the call. This
+	// lets tests assert that teardown runs on a FRESH context (cleanupCtx), not
+	// the cancelled request context.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.Stopped = append(c.Stopped, id)
 	if state, ok := c.containers[id]; ok {
 		state.Running = false
@@ -133,9 +163,41 @@ func (c *Client) Remove(ctx context.Context, id string) error {
 	if c.RemoveErr != nil {
 		return c.RemoveErr
 	}
+	// Mirror the real Docker client: a cancelled context fails the call (see
+	// Stop). The old cleanup path used the request ctx and so leaked the
+	// container on a control-plane restart; cleanupCtx fixes that.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.Removed = append(c.Removed, id)
 	delete(c.containers, id)
+	c.forgetName(id)
 	return nil
+}
+
+func (c *Client) RemoveByName(ctx context.Context, name string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.RemoveByNameErr != nil {
+		return c.RemoveByNameErr
+	}
+	c.RemovedByName = append(c.RemovedByName, name)
+	if id, ok := c.names[name]; ok {
+		delete(c.containers, id)
+		delete(c.names, name)
+	}
+	// Missing container is a no-op (mirrors the real engine's ignore-not-found).
+	return nil
+}
+
+// forgetName drops any name→id mapping pointing at id (called from Remove,
+// which removes by ID).
+func (c *Client) forgetName(id string) {
+	for n, cid := range c.names {
+		if cid == id {
+			delete(c.names, n)
+		}
+	}
 }
 
 func (c *Client) Inspect(ctx context.Context, id string) (*dockerclient.Inspect, error) {

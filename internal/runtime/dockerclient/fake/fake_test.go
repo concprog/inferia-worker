@@ -140,3 +140,93 @@ func TestFake_Logs(t *testing.T) {
 		t.Errorf("got %q", string(got))
 	}
 }
+
+// The fake models Docker's container-name conflict so the runtime's
+// remove-before-create idempotency can be exercised in unit tests.
+func TestFake_CreateConflictsOnDuplicateName(t *testing.T) {
+	c := New()
+	ctx := context.Background()
+	spec := &dockerclient.ContainerSpec{Name: "inferia-vllm-x"}
+
+	if _, err := c.Create(ctx, spec); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	if _, err := c.Create(ctx, spec); err == nil {
+		t.Fatalf("second create with the same name must conflict")
+	}
+	// An empty name is never tracked, so duplicate empty-name creates are fine.
+	if _, err := c.Create(ctx, &dockerclient.ContainerSpec{Name: ""}); err != nil {
+		t.Fatalf("empty-name create 1: %v", err)
+	}
+	if _, err := c.Create(ctx, &dockerclient.ContainerSpec{Name: ""}); err != nil {
+		t.Fatalf("empty-name create 2: %v", err)
+	}
+}
+
+func TestFake_RemoveByNameFreesNameAndNoOpWhenAbsent(t *testing.T) {
+	c := New()
+	ctx := context.Background()
+	spec := &dockerclient.ContainerSpec{Name: "inferia-vllm-x"}
+
+	id, err := c.Create(ctx, spec)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.RemoveByName(ctx, "inferia-vllm-x"); err != nil {
+		t.Fatalf("RemoveByName: %v", err)
+	}
+	if len(c.RemovedByName) != 1 || c.RemovedByName[0] != "inferia-vllm-x" {
+		t.Errorf("RemovedByName = %v", c.RemovedByName)
+	}
+	if _, err := c.Inspect(ctx, id); err == nil {
+		t.Errorf("container should be gone after RemoveByName")
+	}
+	if _, err := c.Create(ctx, spec); err != nil {
+		t.Errorf("create after RemoveByName should succeed, got %v", err)
+	}
+	// Removing an absent name is a no-op (mirrors the engine ignoring 404).
+	if err := c.RemoveByName(ctx, "does-not-exist"); err != nil {
+		t.Errorf("RemoveByName on absent name should be nil, got %v", err)
+	}
+}
+
+func TestFake_RemoveByIDAlsoFreesName(t *testing.T) {
+	c := New()
+	ctx := context.Background()
+	spec := &dockerclient.ContainerSpec{Name: "inferia-vllm-x"}
+
+	id, err := c.Create(ctx, spec)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Remove(ctx, id); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, err := c.Create(ctx, spec); err != nil {
+		t.Errorf("create after Remove(id) should succeed, got %v", err)
+	}
+}
+
+func TestFake_RemoveByNameErrorInjection(t *testing.T) {
+	c := New()
+	c.RemoveByNameErr = errors.New("boom")
+	if err := c.RemoveByName(context.Background(), "n"); err == nil {
+		t.Errorf("expected injected RemoveByName error")
+	}
+}
+
+func TestFake_StopAndRemoveHonorCancelledContext(t *testing.T) {
+	c := New()
+	id, err := c.Create(context.Background(), &dockerclient.ContainerSpec{Name: "n"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.Stop(ctx, id, 1); !errors.Is(err, context.Canceled) {
+		t.Errorf("Stop on cancelled ctx = %v, want context.Canceled", err)
+	}
+	if err := c.Remove(ctx, id); !errors.Is(err, context.Canceled) {
+		t.Errorf("Remove on cancelled ctx = %v, want context.Canceled", err)
+	}
+}

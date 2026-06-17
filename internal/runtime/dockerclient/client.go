@@ -27,6 +27,11 @@ type Client interface {
 	Start(ctx context.Context, containerID string) error
 	Stop(ctx context.Context, containerID string, timeoutSeconds int) error
 	Remove(ctx context.Context, containerID string) error
+	// RemoveByName force-removes a container identified by NAME (not ID). A
+	// missing container is a no-op (returns nil). Used to clear a stale
+	// container occupying a deployment's fixed name before (re)creating it, so
+	// a load is idempotent across orphaned prior attempts.
+	RemoveByName(ctx context.Context, name string) error
 	Inspect(ctx context.Context, containerID string) (*Inspect, error)
 	Logs(ctx context.Context, containerID string, lines int) ([]byte, error)
 }
@@ -214,6 +219,17 @@ func (e *dockerEngine) Stop(ctx context.Context, id string, timeoutSeconds int) 
 
 func (e *dockerEngine) Remove(ctx context.Context, id string) error {
 	return e.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+}
+
+func (e *dockerEngine) RemoveByName(ctx context.Context, name string) error {
+	// ContainerRemove accepts a name or an ID. Force-remove so a created (not
+	// yet started) or running stale container is cleared in one call. A
+	// not-found error means there is nothing to clear — treat it as success.
+	err := e.cli.ContainerRemove(ctx, name, container.RemoveOptions{Force: true})
+	if err != nil && !client.IsErrNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 func (e *dockerEngine) Inspect(ctx context.Context, id string) (*Inspect, error) {
