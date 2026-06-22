@@ -15,7 +15,7 @@ services:
   # The gRPC master + embedded HTTP metadata server run in a single container.
   # vLLM model containers resolve it via the inferia-models bridge network.
   mooncake-master:
-    build: ./deploy/mooncake-master
+    image: ghcr.io/inferiaai/mooncake-master:latest
     container_name: mooncake-master
     restart: unless-stopped
     volumes:

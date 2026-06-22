@@ -28,6 +28,7 @@ type Client interface {
 	Start(ctx context.Context, containerID string) error
 	Stop(ctx context.Context, containerID string, timeoutSeconds int) error
 	Remove(ctx context.Context, containerID string) error
+	RemoveImage(ctx context.Context, image string) error
 	Inspect(ctx context.Context, containerID string) (*Inspect, error)
 	Logs(ctx context.Context, containerID string, lines int) ([]byte, error)
 }
@@ -236,6 +237,11 @@ func (e *dockerEngine) Stop(ctx context.Context, id string, timeoutSeconds int) 
 
 func (e *dockerEngine) Remove(ctx context.Context, id string) error {
 	return e.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+}
+
+func (e *dockerEngine) RemoveImage(ctx context.Context, img string) error {
+	_, err := e.cli.ImageRemove(ctx, img, image.RemoveOptions{Force: true})
+	return err
 }
 
 func (e *dockerEngine) Inspect(ctx context.Context, id string) (*Inspect, error) {

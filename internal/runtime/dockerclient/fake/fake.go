@@ -20,6 +20,7 @@ type Client struct {
 	Pulled          []string
 	// PullProgressLines, when set, are replayed to Pull's onProgress callback.
 	PullProgressLines []string
+	ImagesRemoved   []string
 	Created         []*dockerclient.ContainerSpec
 	Started         []string
 	Stopped         []string
@@ -40,6 +41,7 @@ type Client struct {
 	StartErr         error
 	StopErr          error
 	RemoveErr        error
+	RemoveImageErr   error
 	InspectErr       error
 	LogsErr          error
 
@@ -135,6 +137,16 @@ func (c *Client) Remove(ctx context.Context, id string) error {
 	}
 	c.Removed = append(c.Removed, id)
 	delete(c.containers, id)
+	return nil
+}
+
+func (c *Client) RemoveImage(ctx context.Context, image string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.RemoveImageErr != nil {
+		return c.RemoveImageErr
+	}
+	c.ImagesRemoved = append(c.ImagesRemoved, image)
 	return nil
 }
 

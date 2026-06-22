@@ -296,6 +296,11 @@ func (r *Runtime) LoadModel(ctx context.Context, deploymentID string, plan recip
 		return nil, fmt.Errorf("ollama pull-after-ready: %w", err)
 	}
 
+	// Image no longer needed — the running container's filesystem is already
+	// materialised.  Freeing ~35 GB (vLLM / sglang) is worth the re-pull if
+	// another deployment ever requests the same image.
+	_ = r.cfg.Docker.RemoveImage(ctx, plan.Image)
+
 	r.mu.Lock()
 	d.containerID = cid
 	d.hostPort = hostPort
@@ -400,6 +405,8 @@ func (r *Runtime) LoadDeploymentGroup(ctx context.Context, plan recipes.Deployme
 		info.ContainerID = cid
 		register(info, cp, hostPort)
 	}
+
+	_ = r.cfg.Docker.RemoveImage(ctx, plan.Prefill[0].Image)
 
 	r.mu.Lock()
 	r.groups[plan.DeploymentID] = group
