@@ -515,3 +515,124 @@ func TestBuildPlan_HostPortRange(t *testing.T) {
 		t.Errorf("expected ok for HostPort=65535: %v", err)
 	}
 }
+
+func TestDiffusionBuildPlan_ImageAndCmd(t *testing.T) {
+	r, err := Get("inferia-diffusion")
+	if err != nil {
+		t.Fatalf("Get(inferia-diffusion): %v", err)
+	}
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d-diff",
+		ArtifactURI:  "hf://stabilityai/sdxl-turbo",
+		GPUIndices:   []int{0},
+		HostPort:     18000,
+		Env:          map[string]string{"HF_TOKEN": "secret123"},
+		Config: map[string]any{
+			"model_type":        "image_generation",
+			"trust_remote_code": true,
+			"model_offload":     true,
+			"group_offload":     false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if plan.Image != "docker.io/inferiaai/inferiadiffusion:latest" {
+		t.Errorf("image = %q", plan.Image)
+	}
+	got := strings.Join(plan.Cmd, " ")
+	for _, want := range []string{
+		"inferiadiffusion serve",
+		"--model stabilityai/sdxl-turbo",
+		"--host 0.0.0.0",
+		"--port 8000",
+		"--model-type image",
+		"--trust-remote-code",
+		"--model-offload",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("cmd %q missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "--group-offload") {
+		t.Errorf("cmd %q should not contain --group-offload", got)
+	}
+	if plan.Env["HF_TOKEN"] != "secret123" {
+		t.Errorf("HF_TOKEN missing from plan env")
+	}
+	if plan.ReadyPath != "/health" {
+		t.Errorf("ReadyPath = %q", plan.ReadyPath)
+	}
+}
+
+func TestDiffusionBuildPlan_VideoModelType(t *testing.T) {
+	r, _ := Get("inferia-diffusion")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d-vid",
+		ArtifactURI:  "hf://Wan-AI/Wan2.1-T2V-1.3B",
+		GPUIndices:   []int{0},
+		HostPort:     18001,
+		Config:       map[string]any{"model_type": "video_generation"},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if !strings.Contains(strings.Join(plan.Cmd, " "), "--model-type video") {
+		t.Errorf("expected --model-type video, got %v", plan.Cmd)
+	}
+}
+
+func TestDiffusionBuildPlan_NoModelTypeOmitsFlag(t *testing.T) {
+	r, _ := Get("inferia-diffusion")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d-auto",
+		ArtifactURI:  "hf://segmind/tiny-sd",
+		GPUIndices:   []int{0},
+		HostPort:     18002,
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if strings.Contains(strings.Join(plan.Cmd, " "), "--model-type") {
+		t.Errorf("expected no --model-type flag when unset, got %v", plan.Cmd)
+	}
+}
+
+func TestDiffusionBuildPlan_UnknownModelTypeOmitsFlag(t *testing.T) {
+	// A present-but-unrecognized model_type (e.g. "audio") must omit the flag
+	// and let the server auto-detect, not pass an invalid --model-type value.
+	r, _ := Get("inferia-diffusion")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d-unknown",
+		ArtifactURI:  "hf://some/model",
+		GPUIndices:   []int{0},
+		HostPort:     18003,
+		Config:       map[string]any{"model_type": "audio"},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if strings.Contains(strings.Join(plan.Cmd, " "), "--model-type") {
+		t.Errorf("expected no --model-type flag for unknown type, got %v", plan.Cmd)
+	}
+}
+
+func TestDiffusionBuildPlan_BareImageAndVideoAliases(t *testing.T) {
+	// The CP may send either the *_generation form or the bare image|video form.
+	r, _ := Get("inferia-diffusion")
+	for mt, want := range map[string]string{"image": "--model-type image", "video": "--model-type video"} {
+		plan, err := r.BuildPlan(BuildInput{
+			DeploymentID: "d-" + mt,
+			ArtifactURI:  "hf://some/model",
+			GPUIndices:   []int{0},
+			HostPort:     18004,
+			Config:       map[string]any{"model_type": mt},
+		})
+		if err != nil {
+			t.Fatalf("BuildPlan(%q): %v", mt, err)
+		}
+		if !strings.Contains(strings.Join(plan.Cmd, " "), want) {
+			t.Errorf("model_type=%q: expected %q, got %v", mt, want, plan.Cmd)
+		}
+	}
+}
