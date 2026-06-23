@@ -277,7 +277,7 @@ func (r *Runtime) LoadModel(ctx context.Context, deploymentID string, plan recip
 	// Probing the host-bound endpoint keeps probe + proxy consistent.
 	endpoint := fmt.Sprintf("http://%s:%d", r.cfg.AdvertiseHost, hostPort)
 	probeURL := endpoint + plan.ReadyPath
-	if !r.waitReady(ctx, probeURL) {
+	if !r.waitReady(ctx, probeURL, r.readinessTimeout(plan)) {
 		cctx, ccancel := cleanupCtx()
 		_ = r.cfg.Docker.Stop(cctx, cid, 5)
 		_ = r.cfg.Docker.Remove(cctx, cid)
@@ -385,8 +385,18 @@ func (r *Runtime) drop(id string) {
 	delete(r.deployments, id)
 }
 
-func (r *Runtime) waitReady(ctx context.Context, url string) bool {
-	deadline := time.Now().Add(r.cfg.ReadinessTimeout)
+// readinessTimeout returns the per-recipe readiness timeout when the plan sets
+// one (e.g. diffusion, whose container loads a multi-GB model before serving
+// /health), otherwise the worker's global default.
+func (r *Runtime) readinessTimeout(plan recipes.Plan) time.Duration {
+	if plan.ReadinessTimeout > 0 {
+		return plan.ReadinessTimeout
+	}
+	return r.cfg.ReadinessTimeout
+}
+
+func (r *Runtime) waitReady(ctx context.Context, url string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if r.cfg.ReadinessProbe(url) {
 			return true

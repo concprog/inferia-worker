@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Plan is the concrete Docker invocation produced from a (Recipe, BuildInput) pair.
@@ -28,6 +29,11 @@ type Plan struct {
 	HostPort      int               // port to bind on the host (chosen by the worker)
 	GPUIndices    []int             // GPU device indices to pass to --gpus
 	ReadyPath     string            // HTTP path used for readiness probe (200 means ready)
+	// ReadinessTimeout overrides the worker's global readiness timeout for this
+	// recipe. Zero means "use the worker default". Set it for engines whose
+	// container downloads + loads the model BEFORE serving its ready endpoint
+	// (the global 180s default is far too short for a multi-GB cold start).
+	ReadinessTimeout time.Duration
 }
 
 // BuildInput is what the worker passes when constructing a plan.
