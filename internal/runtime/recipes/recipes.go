@@ -67,6 +67,9 @@ var allowedConfigKeys = map[string]struct{}{
 	"max_batch_size":         {},
 	"max_input_length":       {},
 	"max_total_tokens":       {},
+	"model_type":             {},
+	"model_offload":          {},
+	"group_offload":          {},
 }
 
 // Allowed URI schemes (mirrors spec_builder.py).
@@ -89,7 +92,7 @@ var registry = map[string]Recipe{
 	"ollama":            ollamaRecipe{image: "docker.io/ollama/ollama:latest", port: 11434, readyPath: "/"},
 	"infinity":          infinityRecipe{image: "michaelf34/infinity:latest", port: 7997, readyPath: "/health"},
 	"triton":            tritonRecipe{image: "nvcr.io/nvidia/tritonserver:latest", port: 8000, readyPath: "/v2/health/ready"},
-	"inferia-diffusion": diffusionRecipe{image: "docker.io/inferiaai/inferia-diffusion:latest", port: 8000, readyPath: "/health"},
+	"inferia-diffusion": diffusionRecipe{image: "docker.io/inferiaai/inferiadiffusion:latest", port: 8000, readyPath: "/health"},
 }
 
 // Get returns the recipe registered under name.

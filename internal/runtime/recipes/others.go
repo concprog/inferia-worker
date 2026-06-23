@@ -1,5 +1,7 @@
 package recipes
 
+import "fmt"
+
 // ollamaRecipe wraps the ollama/ollama image. Ollama serves at 11434 and the
 // model is pulled on first request via its native /api/pull endpoint. We
 // pre-pull at start time by invoking ollama with a wrapper command.
@@ -113,8 +115,9 @@ func (r tritonRecipe) BuildPlan(in BuildInput) (Plan, error) {
 	}, nil
 }
 
-// diffusionRecipe runs inferia-diffusion for image/video generation. The image
-// id (model checkpoint) is passed via env so the entrypoint stays uniform.
+// diffusionRecipe runs inferia-diffusion (image/video generation). The model
+// checkpoint and options are passed as explicit `serve` CLI flags; HF_TOKEN
+// (if any) is supplied via env.
 type diffusionRecipe struct {
 	image     string
 	port      int
@@ -129,14 +132,46 @@ func (r diffusionRecipe) BuildPlan(in BuildInput) (Plan, error) {
 	if err := requireGPU(in); err != nil {
 		return Plan{}, err
 	}
-	env := mergeEnv(in.Env, map[string]string{
-		"DIFFUSION_MODEL": stripScheme(in.ArtifactURI),
-		"DIFFUSION_PORT":  "8000",
-	})
+	model := stripScheme(in.ArtifactURI)
+	cfg := sanitiseConfig(in.Config)
+
+	// The InferiaDiffusion image entrypoint is `inferiadiffusion serve …`; it
+	// reads the model + options ONLY from CLI flags (DIFFUSION_* env vars are
+	// ignored), so build them explicitly instead of relying on the default CMD.
+	cmd := []string{
+		"inferiadiffusion", "serve",
+		"--model", model,
+		"--host", "0.0.0.0",
+		"--port", fmt.Sprintf("%d", r.port),
+	}
+	// Map the deployment's model_type to the server's --model-type choice
+	// (image|video). Unknown/absent → omit and let the server auto-detect.
+	if mt, ok := cfg["model_type"].(string); ok {
+		switch mt {
+		case "image_generation", "image":
+			cmd = append(cmd, "--model-type", "image")
+		case "video_generation", "video":
+			cmd = append(cmd, "--model-type", "video")
+		}
+	}
+	if v, ok := cfg["trust_remote_code"].(bool); ok && v {
+		cmd = append(cmd, "--trust-remote-code")
+	}
+	if v, ok := cfg["model_offload"].(bool); ok && v {
+		cmd = append(cmd, "--model-offload")
+	}
+	if v, ok := cfg["group_offload"].(bool); ok && v {
+		cmd = append(cmd, "--group-offload")
+	}
+
+	// HF_TOKEN (if any) arrives via in.Env, injected server-side from the
+	// named token; huggingface_hub inside the container reads it.
+	env := mergeEnv(in.Env, nil)
+
 	return Plan{
 		Image:         r.image,
 		ContainerName: containerName("inferia-diff", in.DeploymentID),
-		Cmd:           nil, // use image's default entrypoint
+		Cmd:           cmd,
 		Env:           env,
 		ContainerPort: r.port,
 		HostPort:      in.HostPort,
