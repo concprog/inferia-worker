@@ -1,6 +1,16 @@
 package recipes
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
+
+// diffusionReadinessTimeout is generous: the InferiaDiffusion server downloads
+// and loads the model (multi-GB, e.g. SDXL/FLUX/Wan) at startup BEFORE it
+// serves /health, so the readiness window must cover a cold model fetch+load
+// on top of the image pull. The worker's 180s global default is far too short
+// and otherwise kills the container mid-load with "readiness probe timed out".
+const diffusionReadinessTimeout = 1800 * time.Second
 
 // ollamaRecipe wraps the ollama/ollama image. Ollama serves at 11434 and the
 // model is pulled on first request via its native /api/pull endpoint. We
@@ -169,13 +179,14 @@ func (r diffusionRecipe) BuildPlan(in BuildInput) (Plan, error) {
 	env := mergeEnv(in.Env, nil)
 
 	return Plan{
-		Image:         r.image,
-		ContainerName: containerName("inferia-diff", in.DeploymentID),
-		Cmd:           cmd,
-		Env:           env,
-		ContainerPort: r.port,
-		HostPort:      in.HostPort,
-		GPUIndices:    in.GPUIndices,
-		ReadyPath:     r.readyPath,
+		Image:            r.image,
+		ContainerName:    containerName("inferia-diff", in.DeploymentID),
+		Cmd:              cmd,
+		Env:              env,
+		ContainerPort:    r.port,
+		HostPort:         in.HostPort,
+		GPUIndices:       in.GPUIndices,
+		ReadyPath:        r.readyPath,
+		ReadinessTimeout: diffusionReadinessTimeout,
 	}, nil
 }

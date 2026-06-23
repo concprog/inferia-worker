@@ -3,6 +3,7 @@ package recipes
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRegistry_KnownRecipes(t *testing.T) {
@@ -634,5 +635,27 @@ func TestDiffusionBuildPlan_BareImageAndVideoAliases(t *testing.T) {
 		if !strings.Contains(strings.Join(plan.Cmd, " "), want) {
 			t.Errorf("model_type=%q: expected %q, got %v", mt, want, plan.Cmd)
 		}
+	}
+}
+
+func TestDiffusionBuildPlan_ReadinessTimeoutGenerous(t *testing.T) {
+	// Diffusion loads the model (multi-GB) before serving /health, so the
+	// readiness window must be far larger than the 180s global default.
+	r, _ := Get("inferia-diffusion")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d-rt", ArtifactURI: "hf://stabilityai/sdxl-turbo",
+		GPUIndices: []int{0}, HostPort: 18005,
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if plan.ReadinessTimeout < 1800*time.Second {
+		t.Errorf("diffusion ReadinessTimeout = %v, want >= 1800s", plan.ReadinessTimeout)
+	}
+	// vllm should NOT set a per-recipe timeout (0 = use the worker global).
+	rv, _ := Get("vllm")
+	pv, _ := rv.BuildPlan(BuildInput{DeploymentID: "d", ArtifactURI: "hf://m", GPUIndices: []int{0}, HostPort: 18006})
+	if pv.ReadinessTimeout != 0 {
+		t.Errorf("vllm ReadinessTimeout = %v, want 0 (global default)", pv.ReadinessTimeout)
 	}
 }

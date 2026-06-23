@@ -127,7 +127,7 @@ func TestWaitReady_ContextCancelled(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if rt.waitReady(ctx, "http://x") {
+	if rt.waitReady(ctx, "http://x", 5*time.Second) {
 		t.Errorf("expected false after ctx cancel")
 	}
 }
@@ -152,5 +152,21 @@ func TestLoadModel_BadSpecRejected(t *testing.T) {
 	bad.Image = "" // invalid plan
 	if _, err := rt.LoadModel(context.Background(), "d", bad); err == nil {
 		t.Errorf("expected error for bad spec")
+	}
+}
+
+func TestReadinessTimeout_PerPlanOverrideElseGlobal(t *testing.T) {
+	rt := New(Config{
+		Docker:           fake.New(),
+		Network:          "n",
+		ReadinessTimeout: 180 * time.Second,
+	})
+	// Plan sets its own (e.g. diffusion) → use it.
+	if got := rt.readinessTimeout(recipes.Plan{ReadinessTimeout: 1800 * time.Second}); got != 1800*time.Second {
+		t.Errorf("per-plan timeout = %v, want 1800s", got)
+	}
+	// Plan leaves it 0 → fall back to the worker global default.
+	if got := rt.readinessTimeout(recipes.Plan{}); got != 180*time.Second {
+		t.Errorf("global fallback = %v, want 180s", got)
 	}
 }
