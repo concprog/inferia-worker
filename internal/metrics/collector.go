@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,7 +98,7 @@ func (c *Collector) RemoveDeployment(id string) {
 
 func (c *Collector) ScrapeVLLM(id string, url string) error {
 	b := c.getBucket(id, "", "")
-	if b.recipe != "vllm" {
+	if b.recipe != "vllm" && !strings.Contains(b.recipe, "vllm-openai") && !strings.Contains(b.recipe, "vllm-omni") {
 		return nil
 	}
 

@@ -6,6 +6,7 @@ package dispatcher
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/inferia/inferia-worker/internal/control"
@@ -254,7 +255,7 @@ func (d *Dispatcher) StartScraper(ctx context.Context, interval time.Duration) {
 				models := d.Rt.LoadedDeployments()
 				for _, id := range models {
 					recipe, _, _, _, _, ok := d.Rt.DeploymentInfo(id)
-					if ok && recipe == "vllm" {
+					if ok && (recipe == "vllm" || strings.Contains(recipe, "vllm-openai") || strings.Contains(recipe, "vllm-omni")) {
 						endpoint := d.Rt.EndpointURL(id)
 						if endpoint != "" && d.Metrics != nil {
 							_ = d.Metrics.ScrapeVLLM(id, endpoint)
