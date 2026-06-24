@@ -135,7 +135,15 @@ var sizingByVRAM = map[string]sizing{
 // When name is empty or the GPU is unknown a safe fallback is returned.
 func GPUOptimalConfig(name string, memoryMiB uint64, numGPUs int) (cfg map[string]any, env map[string]string) {
 	cfg = map[string]any{}
-	env = map[string]string{"VLLM_USE_FASTOKENS": "1"}
+	// NOTE: do NOT default VLLM_USE_FASTOKENS=1 here. The pinned
+	// vllm/vllm-openai image does not bundle the optional `fastokens`
+	// package, so setting it makes vLLM abort at engine init with
+	// "ModuleNotFoundError: No module named 'fastokens' / The 'fastokens'
+	// package (>= 0.2.0) is required when VLLM_USE_FASTOKENS=1" — the
+	// container starts then immediately dies, so the deploy never becomes
+	// ready. Only set env the shipped image supports; a user who builds a
+	// fastokens-enabled image can opt in via the deploy's own env.
+	env = map[string]string{}
 
 	if name == "" {
 		cfg["gpu_memory_utilization"] = 0.90

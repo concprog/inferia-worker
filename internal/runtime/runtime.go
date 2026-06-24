@@ -245,6 +245,20 @@ func (r *Runtime) LoadModel(ctx context.Context, deploymentID string, plan recip
 		r.drop(deploymentID)
 		return nil, fmt.Errorf("spec: %w", err)
 	}
+	// Idempotency: a prior load attempt may have left a container occupying this
+	// deployment's FIXED name (inferia-<recipe>-<deployment_id>). That happens
+	// when the control plane restarts and cancels the request ctx mid-load — the
+	// failure-path cleanup below then no-ops on the dead ctx — or when the worker
+	// process itself restarts before cleanup. Docker rejects the next create with
+	// "container name already in use" and the deploy is stuck DEPLOYING forever
+	// with no running container. Force-remove any stale same-name container first
+	// so a re-drive (or retry) always recreates cleanly. Missing container is a
+	// no-op; a real removal error is surfaced as a log but not fatal — the create
+	// below reports the actual conflict if the stale container truly survived.
+	if err := r.cfg.Docker.RemoveByName(ctx, spec.Name); err != nil {
+		d.prog.append("Note: could not clear stale container " + spec.Name + ": " + err.Error())
+	}
+
 	cid, err := r.cfg.Docker.Create(ctx, spec)
 	if err != nil {
 		d.prog.append("Failed: create: " + err.Error())
@@ -258,7 +272,9 @@ func (r *Runtime) LoadModel(ctx context.Context, deploymentID string, plan recip
 	r.setState(deploymentID, StateStarting)
 	d.prog.append("Starting container…")
 	if err := r.cfg.Docker.Start(ctx, cid); err != nil {
-		_ = r.cfg.Docker.Remove(ctx, cid)
+		cctx, ccancel := cleanupCtx()
+		_ = r.cfg.Docker.Remove(cctx, cid)
+		ccancel()
 		d.prog.append("Failed: start: " + err.Error())
 		d.prog.markFailed()
 		r.setState(deploymentID, StateFailed)
@@ -280,17 +296,21 @@ func (r *Runtime) LoadModel(ctx context.Context, deploymentID string, plan recip
 	// Probing the host-bound endpoint keeps probe + proxy consistent.
 	endpoint := fmt.Sprintf("http://%s:%d", r.cfg.AdvertiseHost, hostPort)
 	probeURL := endpoint + plan.ReadyPath
-	if !r.waitReady(ctx, probeURL) {
-		_ = r.cfg.Docker.Stop(ctx, cid, 5)
-		_ = r.cfg.Docker.Remove(ctx, cid)
+	if !r.waitReady(ctx, probeURL, r.readinessTimeout(plan)) {
+		cctx, ccancel := cleanupCtx()
+		_ = r.cfg.Docker.Stop(cctx, cid, 5)
+		_ = r.cfg.Docker.Remove(cctx, cid)
+		ccancel()
 		r.setState(deploymentID, StateFailed)
 		r.drop(deploymentID)
 		return nil, errors.New("readiness probe timed out")
 	}
 
 	if err := ollamaPullIfNeeded(ctx, plan, endpoint, r.cfg.PullTimeout); err != nil {
-		_ = r.cfg.Docker.Stop(ctx, cid, 5)
-		_ = r.cfg.Docker.Remove(ctx, cid)
+		cctx, ccancel := cleanupCtx()
+		_ = r.cfg.Docker.Stop(cctx, cid, 5)
+		_ = r.cfg.Docker.Remove(cctx, cid)
+		ccancel()
 		r.setState(deploymentID, StateFailed)
 		r.drop(deploymentID)
 		return nil, fmt.Errorf("ollama pull-after-ready: %w", err)
@@ -470,17 +490,31 @@ func (r *Runtime) createAndStartContainer(ctx context.Context, plan recipes.Plan
 		return "", fmt.Errorf("create: %w", err)
 	}
 	if err := r.cfg.Docker.Start(ctx, cid); err != nil {
-		_ = r.cfg.Docker.Remove(ctx, cid)
+		cctx, ccancel := cleanupCtx()
+		_ = r.cfg.Docker.Remove(cctx, cid)
+		ccancel()
 		return "", fmt.Errorf("start: %w", err)
 	}
 	endpoint := fmt.Sprintf("http://%s:%d", r.cfg.AdvertiseHost, plan.HostPort)
 	probeURL := endpoint + plan.ReadyPath
-	if !r.waitReady(ctx, probeURL) {
-		_ = r.cfg.Docker.Stop(ctx, cid, 5)
-		_ = r.cfg.Docker.Remove(ctx, cid)
+	if !r.waitReady(ctx, probeURL, r.cfg.ReadinessTimeout) {
+		cctx, ccancel := cleanupCtx()
+		_ = r.cfg.Docker.Stop(cctx, cid, 5)
+		_ = r.cfg.Docker.Remove(cctx, cid)
+		ccancel()
 		return "", errors.New("readiness probe timed out")
 	}
 	return cid, nil
+}
+
+// cleanupCtx returns a short-lived context for best-effort teardown (Stop /
+// Remove) that MUST run even when the caller's ctx was cancelled — e.g. a
+// control-plane restart broke the control channel and cancelled the load
+// request mid-flight. Using the (possibly cancelled) request ctx for cleanup
+// would no-op the Stop/Remove and leak the container, which is the root cause
+// of the "container name already in use" stuck-DEPLOYING failure.
+func cleanupCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 30*time.Second)
 }
 
 // internal mutators -----------------------------------------------------------
@@ -525,8 +559,18 @@ func (r *Runtime) drop(id string) {
 	delete(r.deployments, id)
 }
 
-func (r *Runtime) waitReady(ctx context.Context, url string) bool {
-	deadline := time.Now().Add(r.cfg.ReadinessTimeout)
+// readinessTimeout returns the per-recipe readiness timeout when the plan sets
+// one (e.g. diffusion, whose container loads a multi-GB model before serving
+// /health), otherwise the worker's global default.
+func (r *Runtime) readinessTimeout(plan recipes.Plan) time.Duration {
+	if plan.ReadinessTimeout > 0 {
+		return plan.ReadinessTimeout
+	}
+	return r.cfg.ReadinessTimeout
+}
+
+func (r *Runtime) waitReady(ctx context.Context, url string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if r.cfg.ReadinessProbe(url) {
 			return true

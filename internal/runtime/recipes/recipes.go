@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Plan is the concrete Docker invocation produced from a (Recipe, BuildInput) pair.
@@ -31,6 +32,11 @@ type Plan struct {
 	GPUIndices    []int             // GPU device indices to pass to --gpus
 	ShmSize       int64             // shared memory size in bytes; 0 = daemon default (64 MB)
 	ReadyPath     string            // HTTP path used for readiness probe (200 means ready)
+	// ReadinessTimeout overrides the worker's global readiness timeout for this
+	// recipe. Zero means "use the worker default". Set it for engines whose
+	// container downloads + loads the model BEFORE serving its ready endpoint
+	// (the global 180s default is far too short for a multi-GB cold start).
+	ReadinessTimeout time.Duration
 }
 
 // Mount describes a Docker volume or bind mount.
@@ -100,6 +106,10 @@ var allowedConfigKeys = map[string]struct{}{
 	"mem_fraction_static":  {},
 	"chunked_prefill_size": {},
 	"max_running_requests": {},
+	// Diffusion / other engine keys
+	"model_type":    {},
+	"model_offload": {},
+	"group_offload": {},
 }
 
 // Allowed URI schemes (mirrors spec_builder.py).
@@ -123,7 +133,7 @@ var registry = map[string]Recipe{
 	"ollama":            ollamaRecipe{image: "docker.io/ollama/ollama:latest", port: 11434, readyPath: "/"},
 	"infinity":          infinityRecipe{image: "michaelf34/infinity:latest", port: 7997, readyPath: "/health"},
 	"triton":            tritonRecipe{image: "nvcr.io/nvidia/tritonserver:latest", port: 8000, readyPath: "/v2/health/ready"},
-	"inferia-diffusion": diffusionRecipe{image: "docker.io/inferiaai/inferia-diffusion:latest", port: 8000, readyPath: "/health"},
+	"inferia-diffusion": diffusionRecipe{image: "docker.io/inferiaai/inferiadiffusion:latest", port: 8000, readyPath: "/health"},
 }
 
 // Get returns the recipe registered under name.

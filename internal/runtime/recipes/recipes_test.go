@@ -3,6 +3,7 @@ package recipes
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRegistry_KnownRecipes(t *testing.T) {
@@ -559,7 +560,6 @@ func TestBuildPlan_VLLMPrefillDecode_Defaults(t *testing.T) {
 	if len(plan.Decode) != 2 {
 		t.Errorf("Decode replicas: got %d, want 2", len(plan.Decode))
 	}
-	// Check roles
 	for i, cp := range plan.Prefill {
 		if cp.Role != KvRoleProducer {
 			t.Errorf("prefill[%d] Role=%q, want kv_producer", i, cp.Role)
@@ -585,13 +585,11 @@ func TestBuildPlan_VLLMPrefillDecode_Defaults(t *testing.T) {
 	if plan.Prefill[0].ReadyPath == "" {
 		t.Errorf("ReadyPath empty")
 	}
-	// All replicas must reference the same image
 	for i := range plan.Decode {
 		if plan.Decode[i].Image != plan.Prefill[0].Image {
 			t.Errorf("decode[%d] image mismatch: %q vs %q", i, plan.Decode[i].Image, plan.Prefill[0].Image)
 		}
 	}
-	// Model must appear in the command
 	joined := strings.Join(plan.Prefill[0].Cmd, " ")
 	if !strings.Contains(joined, "meta-llama/Llama-3.1-8B-Instruct") {
 		t.Errorf("cmd missing model: %v", plan.Prefill[0].Cmd)
@@ -599,7 +597,6 @@ func TestBuildPlan_VLLMPrefillDecode_Defaults(t *testing.T) {
 }
 
 func TestBuildPlan_VLLMPrefillDecode_DefaultsReplicas(t *testing.T) {
-	// When PrefillReplicas/DecodeReplicas are 0 (unset), defaults to 1 each.
 	mc, _ := MultiGet("vllm-prefill-decode")
 	plan, err := mc.BuildDeploymentPlan(BuildInput{
 		DeploymentID: "dep-d",
@@ -620,7 +617,6 @@ func TestBuildPlan_VLLMPrefillDecode_DefaultsReplicas(t *testing.T) {
 
 func TestBuildPlan_VLLMPrefillDecode_RejectsBadInput(t *testing.T) {
 	mc, _ := MultiGet("vllm-prefill-decode")
-	// Missing deployment ID
 	if _, err := mc.BuildDeploymentPlan(BuildInput{
 		ArtifactURI: "hf://org/m",
 		GPUIndices:  []int{0},
@@ -628,7 +624,6 @@ func TestBuildPlan_VLLMPrefillDecode_RejectsBadInput(t *testing.T) {
 	}); err == nil {
 		t.Errorf("expected error for missing DeploymentID")
 	}
-	// No GPU indices (GPU-only)
 	if _, err := mc.BuildDeploymentPlan(BuildInput{
 		DeploymentID: "d",
 		ArtifactURI:  "hf://org/m",
@@ -670,5 +665,144 @@ func TestContainerPlan_ToPlan(t *testing.T) {
 	}
 	if p.ReadyPath != "/health" {
 		t.Errorf("ReadyPath=%q", p.ReadyPath)
+	}
+}
+
+// --- Diffusion tests ---------------------------------------------------------
+
+func TestDiffusionBuildPlan_ImageAndCmd(t *testing.T) {
+	r, err := Get("inferia-diffusion")
+	if err != nil {
+		t.Fatalf("Get(inferia-diffusion): %v", err)
+	}
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d-diff",
+		ArtifactURI:  "hf://stabilityai/sdxl-turbo",
+		GPUIndices:   []int{0},
+		HostPort:     18000,
+		Env:          map[string]string{"HF_TOKEN": "secret123"},
+		Config: map[string]any{
+			"model_type":        "image_generation",
+			"trust_remote_code": true,
+			"model_offload":     true,
+			"group_offload":     false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if plan.Image != "docker.io/inferiaai/inferiadiffusion:latest" {
+		t.Errorf("image = %q", plan.Image)
+	}
+	got := strings.Join(plan.Cmd, " ")
+	for _, want := range []string{
+		"inferiadiffusion serve",
+		"--model stabilityai/sdxl-turbo",
+		"--host 0.0.0.0",
+		"--port 8000",
+		"--model-type image",
+		"--trust-remote-code",
+		"--model-offload",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("cmd %q missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "--group-offload") {
+		t.Errorf("cmd %q should not contain --group-offload", got)
+	}
+	if plan.Env["HF_TOKEN"] != "secret123" {
+		t.Errorf("HF_TOKEN missing from plan env")
+	}
+	if plan.ReadyPath != "/health" {
+		t.Errorf("ReadyPath = %q", plan.ReadyPath)
+	}
+}
+
+func TestDiffusionBuildPlan_VideoModelType(t *testing.T) {
+	r, _ := Get("inferia-diffusion")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d-vid",
+		ArtifactURI:  "hf://Wan-AI/Wan2.1-T2V-1.3B",
+		GPUIndices:   []int{0},
+		HostPort:     18001,
+		Config:       map[string]any{"model_type": "video_generation"},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if !strings.Contains(strings.Join(plan.Cmd, " "), "--model-type video") {
+		t.Errorf("expected --model-type video, got %v", plan.Cmd)
+	}
+}
+
+func TestDiffusionBuildPlan_NoModelTypeOmitsFlag(t *testing.T) {
+	r, _ := Get("inferia-diffusion")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d-auto",
+		ArtifactURI:  "hf://segmind/tiny-sd",
+		GPUIndices:   []int{0},
+		HostPort:     18002,
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if strings.Contains(strings.Join(plan.Cmd, " "), "--model-type") {
+		t.Errorf("expected no --model-type flag when unset, got %v", plan.Cmd)
+	}
+}
+
+func TestDiffusionBuildPlan_UnknownModelTypeOmitsFlag(t *testing.T) {
+	r, _ := Get("inferia-diffusion")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d-unknown",
+		ArtifactURI:  "hf://some/model",
+		GPUIndices:   []int{0},
+		HostPort:     18003,
+		Config:       map[string]any{"model_type": "audio"},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if strings.Contains(strings.Join(plan.Cmd, " "), "--model-type") {
+		t.Errorf("expected no --model-type flag for unknown type, got %v", plan.Cmd)
+	}
+}
+
+func TestDiffusionBuildPlan_BareImageAndVideoAliases(t *testing.T) {
+	r, _ := Get("inferia-diffusion")
+	for mt, want := range map[string]string{"image": "--model-type image", "video": "--model-type video"} {
+		plan, err := r.BuildPlan(BuildInput{
+			DeploymentID: "d-" + mt,
+			ArtifactURI:  "hf://some/model",
+			GPUIndices:   []int{0},
+			HostPort:     18004,
+			Config:       map[string]any{"model_type": mt},
+		})
+		if err != nil {
+			t.Fatalf("BuildPlan(%q): %v", mt, err)
+		}
+		if !strings.Contains(strings.Join(plan.Cmd, " "), want) {
+			t.Errorf("model_type=%q: expected %q, got %v", mt, want, plan.Cmd)
+		}
+	}
+}
+
+func TestDiffusionBuildPlan_ReadinessTimeoutGenerous(t *testing.T) {
+	r, _ := Get("inferia-diffusion")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d-rt", ArtifactURI: "hf://stabilityai/sdxl-turbo",
+		GPUIndices: []int{0}, HostPort: 18005,
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if plan.ReadinessTimeout < 1800*time.Second {
+		t.Errorf("diffusion ReadinessTimeout = %v, want >= 1800s", plan.ReadinessTimeout)
+	}
+	rv, _ := Get("vllm")
+	pv, _ := rv.BuildPlan(BuildInput{DeploymentID: "d", ArtifactURI: "hf://m", GPUIndices: []int{0}, HostPort: 18006})
+	if pv.ReadinessTimeout != 0 {
+		t.Errorf("vllm ReadinessTimeout = %v, want 0 (global default)", pv.ReadinessTimeout)
 	}
 }
