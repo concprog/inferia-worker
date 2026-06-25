@@ -691,7 +691,7 @@ func TestDiffusionBuildPlan_ImageAndCmd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
-	if plan.Image != "docker.io/inferiaai/inferiadiffusion:latest" {
+	if plan.Image != "ghcr.io/inferiaai/inferiadiffusion:2d682d6" {
 		t.Errorf("image = %q", plan.Image)
 	}
 	got := strings.Join(plan.Cmd, " ")

@@ -133,7 +133,7 @@ var registry = map[string]Recipe{
 	"ollama":            ollamaRecipe{image: "docker.io/ollama/ollama:latest", port: 11434, readyPath: "/"},
 	"infinity":          infinityRecipe{image: "michaelf34/infinity:latest", port: 7997, readyPath: "/health"},
 	"triton":            tritonRecipe{image: "nvcr.io/nvidia/tritonserver:latest", port: 8000, readyPath: "/v2/health/ready"},
-	"inferia-diffusion": diffusionRecipe{image: "docker.io/inferiaai/inferiadiffusion:latest", port: 8000, readyPath: "/health"},
+	"inferia-diffusion": diffusionRecipe{image: "ghcr.io/inferiaai/inferiadiffusion:2d682d6", port: 8000, readyPath: "/health"},
 }
 
 // Get returns the recipe registered under name.
