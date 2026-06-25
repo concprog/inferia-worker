@@ -79,10 +79,19 @@ var httpClient = &http.Client{
 // remain locally served).
 func NewProxy(cfg Config) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		if !strings.HasPrefix(c.Path(), "/v1/") {
+		path := c.Path()
+		if !strings.HasPrefix(path, "/v1/") && !strings.HasPrefix(path, "/generate/") {
 			return c.Next()
 		}
 		deploymentID := cfg.Resolver.Resolve(c)
+
+		if strings.HasPrefix(path, "/generate/") && deploymentID != "" {
+			if recipe, _, _, _, _, ok := cfg.Runtime.DeploymentInfo(deploymentID); !ok || !strings.Contains(recipe, "inferiadiffusion") {
+				return c.Next()
+			}
+		} else if strings.HasPrefix(path, "/generate/") {
+			return c.Next()
+		}
 
 		// Disagg path: route through P→D handoff.
 		if cfg.Registry != nil {
@@ -109,7 +118,7 @@ func NewProxy(cfg Config) fiber.Handler {
 		}
 
 		// Build upstream URL.
-		path := c.Path()
+		path = c.Path()
 		query := string(c.Request().URI().QueryString())
 		url := strings.TrimRight(base, "/") + path
 		if query != "" {
