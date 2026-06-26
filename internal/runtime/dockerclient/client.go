@@ -203,21 +203,12 @@ func (e *dockerEngine) Create(ctx context.Context, spec *ContainerSpec) (string,
 		}
 	}
 	if len(spec.GPUDeviceIDs) > 0 {
-		var req container.DeviceRequest
-		if len(spec.GPUDeviceIDs) == 1 && spec.GPUDeviceIDs[0] == "all" {
-			req = container.DeviceRequest{
-				Driver:       "nvidia",
-				Count:        -1,
-				Capabilities: spec.GPUCapabilities,
-			}
-		} else {
-			req = container.DeviceRequest{
-				Driver:       "nvidia",
-				DeviceIDs:    spec.GPUDeviceIDs,
-				Capabilities: spec.GPUCapabilities,
-			}
+		hostCfg.Resources.DeviceRequests = []container.DeviceRequest{
+			{
+				Driver:    "cdi",
+				DeviceIDs: spec.GPUDeviceIDs,
+			},
 		}
-		hostCfg.Resources.DeviceRequests = []container.DeviceRequest{req}
 	}
 
 	netCfg := &network.NetworkingConfig{

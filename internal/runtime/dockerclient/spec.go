@@ -12,6 +12,9 @@ import (
 	"github.com/inferia/inferia-worker/internal/runtime/recipes"
 )
 
+// CDINvidiaVendor is the CDI vendor prefix for NVIDIA GPUs.
+const CDINvidiaVendor = "nvidia.com/gpu"
+
 // ContainerSpec is a wire-format-agnostic description of a container we'd
 // like Docker to run. Keeps the dockerclient testable without importing the
 // SDK types into tests.
@@ -65,7 +68,7 @@ func BuildContainerSpec(p recipes.Plan, networkName string) (*ContainerSpec, err
 
 	deviceIDs := make([]string, 0, len(p.GPUIndices))
 	for _, i := range p.GPUIndices {
-		deviceIDs = append(deviceIDs, strconv.Itoa(i))
+		deviceIDs = append(deviceIDs, CDINvidiaVendor+"="+strconv.Itoa(i))
 	}
 
 	labels := map[string]string{

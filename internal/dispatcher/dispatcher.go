@@ -76,6 +76,20 @@ type TelemetryReader interface {
 	Read() (used map[string]string, metrics *control.MetricsSample)
 }
 
+// validateGPUIndices rejects any index outside [0, totalGPUs).  Returns nil
+// when totalGPUs is 0 (no GPU info available — skip validation).
+func validateGPUIndices(indices []int, totalGPUs int) error {
+	if totalGPUs <= 0 {
+		return nil
+	}
+	for _, idx := range indices {
+		if idx < 0 || idx >= totalGPUs {
+			return fmt.Errorf("GPU index %d out of range [0, %d)", idx, totalGPUs)
+		}
+	}
+	return nil
+}
+
 // LoadModel converts the WS body into a recipes.Plan and asks the runtime to
 // load it. Returning a non-nil error becomes CommandResult{status:"failed"}
 // in the control package.
@@ -99,6 +113,9 @@ func (d *Dispatcher) LoadModel(ctx context.Context, body control.LoadModelBody) 
 	}
 
 	gpuIndices := body.GPUIndices
+	if err := validateGPUIndices(gpuIndices, d.TotalGPUs); err != nil {
+		return "", err
+	}
 	if d.Allocator != nil {
 		gpuIndices = d.Allocator.Allocate(body.DeploymentID, body.GPUIndices)
 	}
@@ -147,6 +164,12 @@ func (d *Dispatcher) loadDeploymentGroup(ctx context.Context, mc recipes.MultiCo
 	prefillGPUs := prefillDesired
 	decodeGPUs := decodeDesired
 	if d.Allocator != nil {
+		if err := validateGPUIndices(prefillGPUs, d.TotalGPUs); err != nil {
+			return "", fmt.Errorf("prefill: %w", err)
+		}
+		if err := validateGPUIndices(decodeGPUs, d.TotalGPUs); err != nil {
+			return "", fmt.Errorf("decode: %w", err)
+		}
 		prefillGPUs = d.Allocator.Allocate(body.DeploymentID+"/prefill", prefillDesired)
 		decodeGPUs = d.Allocator.Allocate(body.DeploymentID+"/decode", decodeDesired)
 	}

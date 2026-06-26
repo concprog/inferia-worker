@@ -60,7 +60,7 @@ func TestBuildContainerSpec_GPUDeviceRequest(t *testing.T) {
 	if len(spec.GPUDeviceIDs) != 3 {
 		t.Fatalf("expected 3 GPU IDs, got %d", len(spec.GPUDeviceIDs))
 	}
-	want := []string{"0", "1", "3"}
+	want := []string{"nvidia.com/gpu=0", "nvidia.com/gpu=1", "nvidia.com/gpu=3"}
 	for i, id := range want {
 		if spec.GPUDeviceIDs[i] != id {
 			t.Errorf("GPUDeviceIDs[%d]: %q want %q", i, spec.GPUDeviceIDs[i], id)
