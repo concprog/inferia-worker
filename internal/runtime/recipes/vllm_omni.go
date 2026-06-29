@@ -9,7 +9,7 @@ import (
 // vllmOmniRecipe builds an invocation of vllm/vllm-omni for diffusion models
 // (text-to-image, text-to-video). LLM-only flags are intentionally absent:
 // max_model_len, max_num_seqs, max_num_batched_tokens, kv_cache_dtype,
-// enable_prefix_caching, quantization, and Mooncake disaggregation.
+// enable_prefix_caching, and Mooncake disaggregation.
 type vllmOmniRecipe struct {
 	image     string
 	port      int
@@ -26,9 +26,9 @@ func (r vllmOmniRecipe) BuildPlan(in BuildInput) (Plan, error) {
 	model := stripScheme(in.ArtifactURI)
 	cfg := sanitiseConfig(in.Config)
 
-	// Diffusion-aware GPU defaults: dtype + gpu_memory_utilization +
-	// tensor_parallel_size when >1 GPU. No LLM sizing params.
-	defaults, envDefaults := omnicfg.GPUDefaults(in.GPUName, len(in.GPUIndices))
+	// Model- and GPU-aware defaults. User config (already in cfg) wins over
+	// defaults — only missing keys are filled in.
+	defaults, envDefaults := omnicfg.Defaults(in.GPUName, in.GPUMemoryMiB, len(in.GPUIndices), model)
 	for k, v := range defaults {
 		if _, ok := cfg[k]; !ok {
 			cfg[k] = v
@@ -44,7 +44,8 @@ func (r vllmOmniRecipe) BuildPlan(in BuildInput) (Plan, error) {
 		"--port", fmt.Sprintf("%d", r.port),
 	}
 
-	// Scalar flags valid for diffusion serving.
+	// Scalar flags valid for diffusion serving. Pass "none" in config to
+	// explicitly disable a flag that would otherwise be auto-set by defaults.
 	for _, k := range []string{
 		"tensor_parallel_size",
 		"pipeline_parallel_size",
@@ -60,9 +61,14 @@ func (r vllmOmniRecipe) BuildPlan(in BuildInput) (Plan, error) {
 		"boundary_ratio",
 		"cache_backend",
 	} {
-		if v, ok := cfg[k]; ok {
-			cmd = append(cmd, dashed(k), cliArg(v))
+		v, ok := cfg[k]
+		if !ok {
+			continue
 		}
+		if s, isStr := v.(string); isStr && s == "none" {
+			continue // "none" = user explicitly disabling this flag
+		}
+		cmd = append(cmd, dashed(k), cliArg(v))
 	}
 
 	// Boolean flags.
