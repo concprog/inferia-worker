@@ -128,7 +128,7 @@ var uriPattern = regexp.MustCompile(`^[a-z][a-z0-9+\-.]*://[^\x00-\x1f` + "`" + 
 
 var registry = map[string]Recipe{
 	"vllm":              vllmRecipe{image: "docker.io/vllm/vllm-openai:v0.22.1", port: 8000, readyPath: "/health"},
-	"vllm-omni":         vllmOmniRecipe{image: "docker.io/vllm/vllm-omni:v0.23.0", port: 8091, readyPath: "/health"},
+	"vllm-omni":         vllmOmniRecipe{image: "docker.io/vllm/vllm-omni:latest", port: 8091, readyPath: "/health"},
 	"sglang":            sglangRecipe{image: "lmsysorg/sglang:latest-runtime", port: 30000, readyPath: "/health"},
 	"ollama":            ollamaRecipe{image: "docker.io/ollama/ollama:latest", port: 11434, readyPath: "/"},
 	"infinity":          infinityRecipe{image: "michaelf34/infinity:latest", port: 7997, readyPath: "/health"},
