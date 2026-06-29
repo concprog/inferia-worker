@@ -3,11 +3,13 @@ package recipes
 import (
 	"fmt"
 
-	"github.com/inferia/inferia-worker/internal/config/vllm"
+	omnicfg "github.com/inferia/inferia-worker/internal/config/vllm/omni"
 )
 
-// vllmOmniRecipe builds an invocation of vllm/vllm-omni. The key difference
-// from the standard vllm recipe is the --omni flag required by vllm-omni images.
+// vllmOmniRecipe builds an invocation of vllm/vllm-omni for diffusion models
+// (text-to-image, text-to-video). LLM-only flags are intentionally absent:
+// max_model_len, max_num_seqs, max_num_batched_tokens, kv_cache_dtype,
+// enable_prefix_caching, quantization, and Mooncake disaggregation.
 type vllmOmniRecipe struct {
 	image     string
 	port      int
@@ -24,74 +26,67 @@ func (r vllmOmniRecipe) BuildPlan(in BuildInput) (Plan, error) {
 	model := stripScheme(in.ArtifactURI)
 	cfg := sanitiseConfig(in.Config)
 
-	// ----- GPU-aware default flags -----
-	envDefaults := map[string]string{
-		"CUDA_MODULE_LOADING": "LAZY",
-	}
-	gpuCfg, gpuEnv := vllm.GPUOptimalConfig(in.GPUName, in.GPUMemoryMiB, len(in.GPUIndices))
-	for k, v := range gpuCfg {
+	// Diffusion-aware GPU defaults: dtype + gpu_memory_utilization +
+	// tensor_parallel_size when >1 GPU. No LLM sizing params.
+	defaults, envDefaults := omnicfg.GPUDefaults(in.GPUName, len(in.GPUIndices))
+	for k, v := range defaults {
 		if _, ok := cfg[k]; !ok {
 			cfg[k] = v
 		}
 	}
-	for k, v := range gpuEnv {
-		envDefaults[k] = v
-	}
-	envDefaults["LD_LIBRARY_PATH"] = "/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
+	envDefaults["CUDA_MODULE_LOADING"] = "LAZY"
 
 	cmd := []string{
-		"vllm",
-		"serve",
-		model,
+		"vllm", "serve", model,
 		"--omni",
 		"--served-model-name", model,
 		"--host", "0.0.0.0",
 		"--port", fmt.Sprintf("%d", r.port),
 	}
-	// Apply config flags. Use --kebab-case to match vLLM convention.
+
+	// Scalar flags valid for diffusion serving.
 	for _, k := range []string{
-		"tensor_parallel_size", "pipeline_parallel_size",
-		"dtype", "max_model_len", "max_num_seqs",
-		"gpu_memory_utilization", "quantization",
-		"max_batch_size", "max_input_length", "max_total_tokens",
-		"kv_cache_dtype", "max_num_batched_tokens",
+		"tensor_parallel_size",
+		"pipeline_parallel_size",
+		"dtype",
+		"gpu_memory_utilization",
+		"quantization",
+		"ignored_layers",
+		"usp",
+		"ring",
+		"vae_patch_parallel_size",
+		"hsdp_shard_size",
+		"flow_shift",
+		"boundary_ratio",
+		"cache_backend",
 	} {
 		if v, ok := cfg[k]; ok {
 			cmd = append(cmd, dashed(k), cliArg(v))
 		}
 	}
+
+	// Boolean flags.
 	if v, ok := cfg["enforce_eager"].(bool); ok && v {
 		cmd = append(cmd, "--enforce-eager")
 	}
-	if v, ok := cfg["enable_prefix_caching"].(bool); ok && v {
-		cmd = append(cmd, "--enable-prefix-caching")
+	if v, ok := cfg["vae_use_slicing"].(bool); ok && v {
+		cmd = append(cmd, "--vae-use-slicing")
+	}
+	if v, ok := cfg["vae_use_tiling"].(bool); ok && v {
+		cmd = append(cmd, "--vae-use-tiling")
+	}
+	if v, ok := cfg["use_hsdp"].(bool); ok && v {
+		cmd = append(cmd, "--use-hsdp")
 	}
 	if v, ok := cfg["trust_remote_code"].(bool); ok && v {
 		cmd = append(cmd, "--trust-remote-code")
 	}
 
-	var planMounts []Mount
-	var planEntrypoint []string
-	if vllm.MooncakeEnabled() {
-		vllm.ApplyMooncakeFlags(cfg, envDefaults, &cmd)
-		planMounts = []Mount{{
-			Type:     "volume",
-			Source:   vllm.MooncakeConfigVolume(),
-			Target:   vllm.MooncakeConfigMountPath(),
-			ReadOnly: true,
-		}}
-		planEntrypoint = vllm.MooncakeEntrypoint()
-	}
-
-	env := mergeEnv(in.Env, envDefaults)
-
 	return Plan{
 		Image:         r.image,
 		ContainerName: containerName("inferia-vllm-omni", in.DeploymentID),
 		Cmd:           cmd,
-		Entrypoint:    planEntrypoint,
-		Env:           env,
-		Mounts:        planMounts,
+		Env:           mergeEnv(in.Env, envDefaults),
 		ContainerPort: r.port,
 		HostPort:      in.HostPort,
 		GPUIndices:    in.GPUIndices,

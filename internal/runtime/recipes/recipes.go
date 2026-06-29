@@ -110,6 +110,18 @@ var allowedConfigKeys = map[string]struct{}{
 	"model_type":    {},
 	"model_offload": {},
 	"group_offload": {},
+	// vllm-omni diffusion keys
+	"vae_use_slicing":         {},
+	"vae_use_tiling":          {},
+	"vae_patch_parallel_size": {},
+	"usp":                     {},
+	"ring":                    {},
+	"use_hsdp":                {},
+	"hsdp_shard_size":         {},
+	"flow_shift":              {},
+	"boundary_ratio":          {},
+	"cache_backend":           {},
+	"ignored_layers":          {},
 }
 
 // Allowed URI schemes (mirrors spec_builder.py).
