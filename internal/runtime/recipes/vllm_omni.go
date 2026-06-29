@@ -40,6 +40,7 @@ func (r vllmOmniRecipe) BuildPlan(in BuildInput) (Plan, error) {
 	envDefaults["LD_LIBRARY_PATH"] = "/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
 
 	cmd := []string{
+		"vllm",
 		"serve",
 		model,
 		"--omni",
